@@ -1,0 +1,104 @@
+name: Twitch Chat Macro
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Twitch channel to join (without #)"
+        required: true
+        type: string
+      command:
+        description: "Chat message or command to send"
+        required: true
+        type: string
+      interval_seconds:
+        description: "Seconds between each send (min 1; respect channel rules)"
+        required: true
+        type: string
+        default: "60"
+      duration_minutes:
+        description: "How long the bot should keep sending"
+        required: true
+        type: string
+        default: "30"
+      send_count:
+        description: "Optional max sends (0 = until duration ends)"
+        required: false
+        type: string
+        default: "0"
+      dry_run:
+        description: "Log only; do not connect to Twitch"
+        required: false
+        type: boolean
+        default: false
+
+# Long-running chat loop — cancel previous run for this workflow when re-triggered
+concurrency:
+  group: twitch-macro
+  cancel-in-progress: true
+
+jobs:
+  send-command:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate inputs
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          COMMAND: ${{ inputs.command }}
+          INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+          SEND_COUNT: ${{ inputs.send_count }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          channel = os.environ["CHANNEL"].strip()
+          command = os.environ["COMMAND"].strip()
+          interval = float(os.environ["INTERVAL_SECONDS"])
+          duration = float(os.environ["DURATION_MINUTES"])
+          count = int(float(os.environ.get("SEND_COUNT") or "0"))
+          if not channel:
+              sys.exit("channel is required")
+          if not command:
+              sys.exit("command is required")
+          if interval < 1:
+              sys.exit("interval_seconds must be >= 1")
+          if duration <= 0 and count <= 0:
+              sys.exit("duration_minutes or send_count must be positive")
+          # GitHub Actions hard cap ~6h; warn via exit if over
+          if duration > 360:
+              sys.exit("duration_minutes cannot exceed 360 (GitHub Actions job limit)")
+          print("inputs ok")
+          PY
+
+      - name: Check secrets
+        if: ${{ inputs.dry_run == false }}
+        env:
+          TWITCH_USERNAME: ${{ secrets.TWITCH_USERNAME }}
+          TWITCH_OAUTH_TOKEN: ${{ secrets.TWITCH_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$TWITCH_USERNAME" ] || [ -z "$TWITCH_OAUTH_TOKEN" ]; then
+            echo "::error::Add repository secrets TWITCH_USERNAME and TWITCH_OAUTH_TOKEN"
+            echo "Get a chat token from https://twitchtokengenerator.com (scope: chat:send) or https://dev.twitch.tv/"
+            exit 1
+          fi
+
+      - name: Run macro bot
+        env:
+          TWITCH_CHANNEL: ${{ inputs.channel }}
+          COMMAND: ${{ inputs.command }}
+          INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+          SEND_COUNT: ${{ inputs.send_count }}
+          TWITCH_USERNAME: ${{ secrets.TWITCH_USERNAME }}
+          TWITCH_OAUTH_TOKEN: ${{ secrets.TWITCH_OAUTH_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python bot/twitch_macro.py
