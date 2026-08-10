@@ -1,75 +1,52 @@
 # Fyscmacro (FYSC)
 
-YouTube live chat macro that posts a command on a timer **you** set, using YouTube’s **InnerTube** API (`/youtubei/v1/live_chat/send_message`). Triggered with a **GitHub Actions** workflow.
+YouTube live chat macro on a timer you choose, via **GitHub Actions**.
 
-> Use only where you are allowed to chat. Short intervals look like spam and can get you timed out or banned. InnerTube is unofficial; cookies expire and YouTube can change endpoints.
+Uses **both**:
+- **InnerTube** — find the live video / channel (and InnerTube send fallback)
+- **YouTube Data API** — `liveChatMessages.insert` when the OAuth token allows it
 
-## What you get
+## No desktop. No required secrets.
 
-| Piece | Purpose |
-| --- | --- |
-| `bot/youtube_macro.py` | InnerTube client + interval sender |
-| `.github/workflows/youtube-macro.yml` | Manual workflow inputs |
-| `tests/test_youtube_macro.py` | Offline unit tests |
+Auth is **YouTube TV device login** on your **phone**:
 
-## One-time cookie setup
+1. Start **Actions → YouTube Live Chat Macro → Run workflow**
+2. Open the running job log
+3. When you see a code, open the printed URL on your phone (usually `https://www.google.com/device`)
+4. Enter the code and approve
+5. The job continues and sends your command on the interval
 
-InnerTube chat send needs a **logged-in browser session**, not official OAuth client secrets.
+You do **not** need to copy browser cookies or create a Google Cloud project for the default path.
 
-1. Open an **incognito/private** window and sign into YouTube (incognito avoids cookie rotation while you copy).
-2. Open DevTools → **Network**.
-3. Load any `youtube.com` page and click a request to `www.youtube.com`.
-4. Copy the full **`Cookie`** request header.
-5. Close the incognito window.
-6. In this repo: **Settings → Secrets and variables → Actions** → add:
-
-| Secret | Value |
-| --- | --- |
-| `YOUTUBE_COOKIES` | Full Cookie header string |
-
-It must include **`SAPISID`** (or `__Secure-3PAPISID`). Also keep `SID` / `HSID` / `SSID` / `APISID` / `__Secure-1PSID` if present.
-
-The Google account behind those cookies is the account that posts in chat.
-
-## Run from GitHub Actions
-
-1. **Actions** → **YouTube Live Chat Macro** → **Run workflow**
-2. Inputs:
+## Workflow inputs
 
 | Input | Example | Meaning |
 | --- | --- | --- |
-| `video` | `https://www.youtube.com/watch?v=…` | Live video URL or ID (**preferred**) |
-| `channel` | `@SomeCreator` | If `video` empty, opens `/@handle/live` |
-| `command` | `!join` | Exact chat text |
-| `interval_seconds` | `60` | Wait between sends (min `1`) |
-| `duration_minutes` | `30` | Run length (max `360`) |
-| `send_count` | `0` | Optional cap; `0` = until duration ends |
-| `dry_run` | `false` | `true` = no YouTube calls |
+| `video` | live URL or ID | Preferred target |
+| `channel` | `@SomeCreator` | Uses `/live` if `video` empty |
+| `command` | `!join` | Chat text to send |
+| `interval_seconds` | `60` | Wait between sends |
+| `duration_minutes` | `30` | How long to run (max 360) |
+| `send_count` | `0` | Optional cap |
+| `auth_timeout_seconds` | `600` | How long to wait for phone login |
+| `dry_run` | `false` | Skip login/sends |
 
-How it works:
+## Optional: skip phone login next time
 
-1. Resolve `videoId` + `channelId` from the watch page / `/live`
-2. Build InnerTube `params` (protobuf)
-3. `POST /youtubei/v1/live_chat/send_message` with `SAPISIDHASH` auth
-4. Sleep `interval_seconds`, repeat until duration/count ends
+After a successful login the log may print a **refresh token**. If you want unattended runs, add these repo secrets (optional):
 
-## Run locally
+| Secret | When |
+| --- | --- |
+| `YOUTUBE_REFRESH_TOKEN` | From a previous successful login log |
+| `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` | Only if you override the auto TV client |
+
+If those secrets are missing, each run just asks you to approve on your phone again.
+
+## Local run
 
 ```bash
-export YOUTUBE_COOKIES='SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...'
-
 python3 bot/youtube_macro.py \
   --video 'https://www.youtube.com/watch?v=VIDEO_ID' \
-  --command '!join' \
-  --interval-seconds 60 \
-  --duration-minutes 30
-```
-
-Or by channel live page:
-
-```bash
-python3 bot/youtube_macro.py \
-  --channel '@SomeCreator' \
   --command '!join' \
   --interval-seconds 60 \
   --duration-minutes 30
@@ -78,12 +55,7 @@ python3 bot/youtube_macro.py \
 Dry run:
 
 ```bash
-python3 bot/youtube_macro.py \
-  --video dQw4w9WgXcQ \
-  --command '!join' \
-  --interval-seconds 1 \
-  --count 3 \
-  --dry-run
+python3 bot/youtube_macro.py --video dQw4w9WgXcQ --command '!join' --count 3 --dry-run
 ```
 
 ## Tests
@@ -92,8 +64,8 @@ python3 bot/youtube_macro.py \
 python3 -m unittest tests/test_youtube_macro.py -v
 ```
 
-## Limits
+## Notes
 
-- Job timeout ~**6 hours** (`duration_minutes` ≤ **360**).
-- Cookies go stale; if sends fail, refresh `YOUTUBE_COOKIES`.
-- Prefer a **video URL** over channel auto-detect when the stream is already open.
+- Follow YouTube + channel chat rules; short intervals can get you timed out.
+- Device codes expire (~30 minutes); raise `auth_timeout_seconds` if you need longer.
+- Prefer a **video URL** when the stream is already open.

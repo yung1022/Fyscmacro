@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""YouTube live chat macro via InnerTube (youtubei)."""
+"""YouTube live chat macro: InnerTube discovery + Data API / InnerTube send.
+
+Auth is phone-friendly device OAuth (YouTube TV client) — no desktop cookies
+and no required GitHub secrets. Open the printed URL on your phone, enter the
+code, and the workflow continues.
+"""
 
 from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import re
@@ -19,24 +23,32 @@ import urllib.request
 from typing import Any, Optional
 
 ORIGIN = "https://www.youtube.com"
-# Public WEB InnerTube key (also embedded in youtube.com)
+YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
 DEFAULT_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 DEFAULT_CLIENT_VERSION = "2.20260101.00.00"
+TV_CLIENT_VERSION = "7.20260311.12.00"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+TV_USER_AGENT = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
+
+# Widely used YouTube TV OAuth client (fallback if /tv scrape fails)
+FALLBACK_TV_CLIENT_ID = (
+    "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
+)
+FALLBACK_TV_CLIENT_SECRET = "SboVhoG9s0rNafixCJ7RIGRR"
 
 
-class InnerTubeError(RuntimeError):
+class BotError(RuntimeError):
     def __init__(self, message: str, *, status: int = 0, body: str = "") -> None:
         self.status = status
         self.body = body
         super().__init__(message)
 
 
-# --- minimal protobuf helpers (masterchat / YouTube.js LiveMessageParams) ---
+# --- protobuf (InnerTube send_message params) ---
 
 
 def _encode_varint(n: int) -> bytes:
@@ -65,63 +77,18 @@ def pb_vt(field: int, value: int) -> bytes:
 
 
 def b64_type_b2(payload: bytes) -> str:
-    """Double-encoded params used by live_chat/send_message (B64Type.B2)."""
     inner = base64.b64encode(payload).decode("ascii")
     uri = urllib.parse.quote(inner, safe="")
     return base64.b64encode(uri.encode("utf-8")).decode("ascii")
 
 
 def send_message_params(channel_id: str, video_id: str) -> str:
-    """Build InnerTube params for live_chat/send_message."""
     cv_token = pb_ld(5, [pb_ld(1, channel_id), pb_ld(2, video_id)])
     raw = b"".join([pb_ld(1, cv_token), pb_vt(2, 2), pb_vt(3, 4)])
     return b64_type_b2(raw)
 
 
-# --- cookies / SAPISIDHASH ---
-
-
-def parse_cookie_header(cookie_header: str) -> dict[str, str]:
-    cookies: dict[str, str] = {}
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        name, value = part.split("=", 1)
-        cookies[name.strip()] = value.strip()
-    return cookies
-
-
-def pick_sapisid(cookies: dict[str, str]) -> str:
-    for key in ("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"):
-        if cookies.get(key):
-            return cookies[key]
-    raise InnerTubeError(
-        "Cookie string is missing SAPISID / __Secure-3PAPISID "
-        "(required to post chat). Copy cookies while logged into YouTube."
-    )
-
-
-def sapisidhash(sapisid: str, origin: str = ORIGIN) -> str:
-    ts = int(time.time())
-    digest = hashlib.sha1(f"{ts} {sapisid} {origin}".encode("utf-8")).hexdigest()
-    return f"SAPISIDHASH {ts}_{digest}"
-
-
-def auth_headers(cookie_header: str) -> dict[str, str]:
-    cookies = parse_cookie_header(cookie_header)
-    sapisid = pick_sapisid(cookies)
-    return {
-        "Cookie": cookie_header.strip(),
-        "Authorization": sapisidhash(sapisid),
-        "X-Origin": ORIGIN,
-        "X-Goog-AuthUser": "0",
-        "Origin": ORIGIN,
-        "Referer": f"{ORIGIN}/",
-    }
-
-
-# --- HTTP / InnerTube ---
+# --- HTTP ---
 
 
 def http_request(
@@ -131,36 +98,28 @@ def http_request(
     headers: Optional[dict[str, str]] = None,
     body: Optional[bytes] = None,
     timeout: float = 30.0,
-) -> tuple[int, str, dict[str, str]]:
+) -> tuple[int, str]:
     hdrs = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     context = ssl.create_default_context()
-    # Do not use a shared cookie jar; we pass Cookie explicitly.
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPRedirectHandler(),
-        urllib.request.HTTPSHandler(context=context),
-    )
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-            return resp.status, raw, resp_headers
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+            return resp.status, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace")
-        raise InnerTubeError(
+        raise BotError(
             f"HTTP {exc.code} for {url}", status=exc.code, body=err_body
         ) from exc
 
 
 def http_get_text(url: str, headers: Optional[dict[str, str]] = None) -> str:
-    _, text, _ = http_request("GET", url, headers=headers)
+    _, text = http_request("GET", url, headers=headers)
     return text
 
 
 def http_get_final_url(url: str, headers: Optional[dict[str, str]] = None) -> str:
-    """Follow redirects and return the final URL (for /@handle/live)."""
     class Capture(urllib.request.HTTPRedirectHandler):
         last = url
 
@@ -182,13 +141,40 @@ def http_get_final_url(url: str, headers: Optional[dict[str, str]] = None) -> st
             Capture.last = resp.geturl()
             resp.read(1024)
     except urllib.error.HTTPError as exc:
-        # Some live redirects still land on a usable URL
-        if exc.url:
-            return exc.url
-        raise InnerTubeError(
-            f"HTTP {exc.code} for {url}", status=exc.code, body=""
-        ) from exc
+        if getattr(exc, "url", None):
+            return str(exc.url)
+        raise BotError(f"HTTP {exc.code} for {url}", status=exc.code) from exc
     return Capture.last
+
+
+def http_json(
+    method: str,
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    body: Optional[dict[str, Any]] = None,
+    form: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    hdrs = {"Accept": "application/json"}
+    data: Optional[bytes] = None
+    if form is not None:
+        data = urllib.parse.urlencode(form).encode("utf-8")
+        hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+    elif body is not None:
+        data = json.dumps(body).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    if headers:
+        hdrs.update(headers)
+    status, text = http_request(method, url, headers=hdrs, body=data)
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise BotError(f"Invalid JSON from {url}: {text[:200]}") from exc
+
+
+# --- parsing helpers ---
 
 
 def extract_ytcfg(html: str) -> dict[str, str]:
@@ -196,9 +182,7 @@ def extract_ytcfg(html: str) -> dict[str, str]:
     for key in (
         "INNERTUBE_API_KEY",
         "INNERTUBE_CLIENT_VERSION",
-        "INNERTUBE_CLIENT_NAME",
         "DELEGATED_SESSION_ID",
-        "SESSION_INDEX",
     ):
         match = re.search(rf'"{key}"\s*:\s*"([^"]+)"', html)
         if match:
@@ -207,19 +191,16 @@ def extract_ytcfg(html: str) -> dict[str, str]:
 
 
 def extract_json_assignment(html: str, var_name: str) -> Optional[dict[str, Any]]:
-    marker = f"var {var_name} = "
-    idx = html.find(marker)
-    if idx < 0:
-        marker = f"window[\"{var_name}\"] = "
+    for marker in (f"var {var_name} = ", f'window["{var_name}"] = '):
         idx = html.find(marker)
-    if idx < 0:
-        return None
-    idx += len(marker)
-    try:
-        payload, _ = json.JSONDecoder().raw_decode(html[idx:])
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
+        if idx >= 0:
+            idx += len(marker)
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(html[idx:])
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+    return None
 
 
 def extract_video_id(value: str) -> Optional[str]:
@@ -257,204 +238,7 @@ def extract_channel_id(value: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-class InnerTubeSession:
-    def __init__(self, cookie_header: str = "", dry_run: bool = False) -> None:
-        self.cookie_header = cookie_header.strip()
-        self.dry_run = dry_run
-        self.api_key = DEFAULT_API_KEY
-        self.client_version = DEFAULT_CLIENT_VERSION
-        self.delegated_session_id: Optional[str] = None
-        self._bootstrapped = False
-
-    def bootstrap(self) -> None:
-        if self._bootstrapped:
-            return
-        headers = {"Cookie": self.cookie_header} if self.cookie_header else None
-        html = http_get_text(f"{ORIGIN}/", headers=headers)
-        cfg = extract_ytcfg(html)
-        self.api_key = cfg.get("INNERTUBE_API_KEY", self.api_key)
-        self.client_version = cfg.get(
-            "INNERTUBE_CLIENT_VERSION", self.client_version
-        )
-        self.delegated_session_id = cfg.get("DELEGATED_SESSION_ID")
-        self._bootstrapped = True
-
-    def _context(self) -> dict[str, Any]:
-        return {
-            "client": {
-                "clientName": "WEB",
-                "clientVersion": self.client_version,
-                "hl": "en",
-                "gl": "US",
-                "userAgent": USER_AGENT,
-            }
-        }
-
-    def _headers(self, *, authed: bool) -> dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "X-Youtube-Client-Name": "1",
-            "X-Youtube-Client-Version": self.client_version,
-        }
-        if authed:
-            if not self.cookie_header:
-                raise InnerTubeError("YOUTUBE_COOKIES is required to send chat")
-            headers.update(auth_headers(self.cookie_header))
-            if self.delegated_session_id:
-                headers["X-Goog-PageId"] = self.delegated_session_id
-        elif self.cookie_header:
-            headers["Cookie"] = self.cookie_header
-        return headers
-
-    def youtubei(
-        self,
-        path: str,
-        payload: dict[str, Any],
-        *,
-        authed: bool = False,
-    ) -> dict[str, Any]:
-        self.bootstrap()
-        body = {"context": self._context(), **payload}
-        url = f"{ORIGIN}/youtubei/v1/{path}?prettyPrint=false&key={self.api_key}"
-        status, text, _ = http_request(
-            "POST",
-            url,
-            headers=self._headers(authed=authed),
-            body=json.dumps(body).encode("utf-8"),
-        )
-        if status >= 400:
-            raise InnerTubeError(
-                f"InnerTube {path} failed with HTTP {status}",
-                status=status,
-                body=text,
-            )
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise InnerTubeError(f"Invalid JSON from {path}: {text[:200]}") from exc
-        return data
-
-    def resolve_video_from_channel(self, channel: str) -> str:
-        handle = extract_channel_handle(channel)
-        channel_id = extract_channel_id(channel)
-        headers = {"Cookie": self.cookie_header} if self.cookie_header else None
-        if handle:
-            final = http_get_final_url(f"{ORIGIN}/@{handle}/live", headers=headers)
-            video_id = extract_video_id(final)
-            if video_id:
-                return video_id
-            # Fallback: parse live badge from /streams
-            html = http_get_text(f"{ORIGIN}/@{handle}/streams", headers=headers)
-            video_id = _find_live_video_in_html(html)
-            if video_id:
-                return video_id
-            raise InnerTubeError(
-                f"No active livestream found for @{handle}. "
-                "Pass a live video URL/ID instead."
-            )
-        if channel_id:
-            final = http_get_final_url(
-                f"{ORIGIN}/channel/{channel_id}/live", headers=headers
-            )
-            video_id = extract_video_id(final)
-            if video_id:
-                return video_id
-            raise InnerTubeError(
-                f"No active livestream found for channel {channel_id}."
-            )
-        # Bare handle without @
-        return self.resolve_video_from_channel("@" + channel.lstrip("@"))
-
-    def resolve_ids(self, video: str, channel: str) -> tuple[str, str]:
-        video_id = extract_video_id(video) if video else None
-        if not video_id and channel:
-            video_id = self.resolve_video_from_channel(channel)
-        if not video_id:
-            raise InnerTubeError("Provide --video (URL/ID) or --channel (@handle)")
-
-        headers = {"Cookie": self.cookie_header} if self.cookie_header else None
-        html = http_get_text(f"{ORIGIN}/watch?v={video_id}", headers=headers)
-        cfg = extract_ytcfg(html)
-        if cfg.get("INNERTUBE_API_KEY"):
-            self.api_key = cfg["INNERTUBE_API_KEY"]
-        if cfg.get("INNERTUBE_CLIENT_VERSION"):
-            self.client_version = cfg["INNERTUBE_CLIENT_VERSION"]
-        if cfg.get("DELEGATED_SESSION_ID"):
-            self.delegated_session_id = cfg["DELEGATED_SESSION_ID"]
-        self._bootstrapped = True
-
-        player = extract_json_assignment(html, "ytInitialPlayerResponse")
-        channel_id = None
-        is_live = False
-        if player:
-            details = player.get("videoDetails") or {}
-            channel_id = details.get("channelId")
-            is_live = bool(details.get("isLive") or details.get("isLiveContent"))
-            micro = (player.get("microformat") or {}).get(
-                "playerMicroformatRenderer"
-            ) or {}
-            if not channel_id:
-                channel_id = micro.get("externalChannelId")
-            live_details = micro.get("liveBroadcastDetails") or {}
-            if live_details.get("isLiveNow"):
-                is_live = True
-
-        if not channel_id:
-            # InnerTube player fallback
-            data = self.youtubei("player", {"videoId": video_id}, authed=False)
-            details = data.get("videoDetails") or {}
-            channel_id = details.get("channelId")
-            is_live = bool(details.get("isLive") or details.get("isLiveContent"))
-
-        if not channel_id:
-            raise InnerTubeError(f"Could not resolve channelId for video {video_id}")
-        if not is_live:
-            # Still try to send — some premieres report oddly; warn only.
-            print(
-                f"Warning: video {video_id} may not be live right now",
-                flush=True,
-            )
-        return video_id, str(channel_id)
-
-    def send_message(self, channel_id: str, video_id: str, message: str) -> dict[str, Any]:
-        message = message.replace("\r", " ").replace("\n", " ").strip()
-        if not message:
-            raise ValueError("Message/command is empty")
-        if len(message) > 200:
-            raise ValueError("Message exceeds typical YouTube live chat length (~200)")
-
-        payload = {
-            "params": send_message_params(channel_id, video_id),
-            "richMessage": {"textSegments": [{"text": message}]},
-            "clientMessageId": str(uuid.uuid4()),
-        }
-        data = self.youtubei("live_chat/send_message", payload, authed=True)
-        if data.get("timeoutDurationUsec"):
-            usec = int(data["timeoutDurationUsec"])
-            raise InnerTubeError(
-                f"Account timed out from chat for ~{usec // 1_000_000}s"
-            )
-        actions = data.get("actions") or []
-        if not actions:
-            raise InnerTubeError(
-                "Send failed (empty actions). Cookies may be expired, "
-                "chat may be disabled, or params invalid.",
-                body=json.dumps(data)[:800],
-            )
-        # Error toast: "Error, try again."
-        toast = json.dumps(actions)
-        if "Error, try again" in toast or "liveChatAddToToastAction" in toast:
-            if "liveChatTextMessageRenderer" not in toast:
-                raise InnerTubeError(
-                    "Send rejected by YouTube (toast error). "
-                    "Check cookies and that the stream chat is open.",
-                    body=toast[:800],
-                )
-        return data
-
-
 def _find_live_video_in_html(html: str) -> Optional[str]:
-    # Prefer badges marked LIVE on /streams shelf
     for match in re.finditer(
         r'"videoId":"([\w-]{11})"[^}]{0,400}?"style":"LIVE"', html
     ):
@@ -466,53 +250,479 @@ def _find_live_video_in_html(html: str) -> Optional[str]:
     return None
 
 
+def gh_notice(title: str, message: str) -> None:
+    # GitHub Actions annotation (safe characters only)
+    safe_title = title.replace("\n", " ").replace("%", "%25").replace(":", "%3A")
+    safe_msg = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    print(f"::notice title={safe_title}::{safe_msg}", flush=True)
+
+
+# --- OAuth device flow (phone) ---
+
+
+def scrape_tv_oauth_client() -> tuple[str, str]:
+    """Pull client_id/secret from YouTube TV JS (same approach as YouTube.js)."""
+    html = http_get_text(
+        f"{ORIGIN}/tv",
+        headers={"User-Agent": TV_USER_AGENT, "Referer": f"{ORIGIN}/tv"},
+    )
+    script = re.search(
+        r'<script[^>]+id="base-js"[^>]+src="([^"]+)"', html
+    ) or re.search(r'src="(/s/player/[^"]+/base.js)"', html)
+    if not script:
+        # Newer TV pages may reference base.js differently
+        script = re.search(r'src="(https://www\.youtube\.com/s/[^"]+base\.js)"', html)
+    if not script:
+        print("TV base.js not found; using fallback OAuth client", flush=True)
+        return FALLBACK_TV_CLIENT_ID, FALLBACK_TV_CLIENT_SECRET
+
+    src = script.group(1)
+    if src.startswith("//"):
+        src = "https:" + src
+    elif src.startswith("/"):
+        src = ORIGIN + src
+    js = http_get_text(src, headers={"User-Agent": TV_USER_AGENT})
+    match = re.search(
+        r'clientId:"(?P<client_id>[^"]+)",[^"]*?:"(?P<client_secret>[^"]+)"',
+        js,
+    )
+    if not match:
+        print("TV client identity not found in JS; using fallback", flush=True)
+        return FALLBACK_TV_CLIENT_ID, FALLBACK_TV_CLIENT_SECRET
+    return match.group("client_id"), match.group("client_secret")
+
+
+def device_login(
+    *,
+    client_id: str,
+    client_secret: str,
+    timeout_seconds: float = 600.0,
+) -> dict[str, Any]:
+    """YouTube TV device OAuth — authorize on your phone, no desktop needed."""
+    code_url = f"{ORIGIN}/o/oauth2/device/code"
+    token_url = f"{ORIGIN}/o/oauth2/token"
+    payload = {
+        "client_id": client_id,
+        "scope": (
+            "http://gdata.youtube.com "
+            "https://www.googleapis.com/auth/youtube "
+            "https://www.googleapis.com/auth/youtube.force-ssl "
+            "https://www.googleapis.com/auth/youtube-paid-content"
+        ),
+        "device_id": str(uuid.uuid4()).replace("-", ""),
+        "device_model": "ytlr::",
+    }
+    data = http_json("POST", code_url, body=payload)
+    if data.get("error") or data.get("error_code"):
+        raise BotError(f"Device code request failed: {data}")
+
+    user_code = data["user_code"]
+    device_code = data["device_code"]
+    interval = float(data.get("interval") or 5)
+    verification_url = data.get("verification_url") or "https://www.google.com/device"
+    expires_in = float(data.get("expires_in") or 1800)
+    wait_for = min(timeout_seconds, expires_in - 5)
+
+    print("", flush=True)
+    print("=" * 60, flush=True)
+    print("  PHONE LOGIN REQUIRED (no desktop / no cookies)", flush=True)
+    print(f"  1) Open: {verification_url}", flush=True)
+    print(f"  2) Enter code: {user_code}", flush=True)
+    print("  3) Approve access with your YouTube account", flush=True)
+    print("=" * 60, flush=True)
+    print("", flush=True)
+    gh_notice(
+        "Phone login",
+        f"Open {verification_url} and enter code {user_code}",
+    )
+
+    deadline = time.monotonic() + wait_for
+    token_body = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": device_code,
+        "grant_type": "http://oauth.net/grant_type/device/1.0",
+    }
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        try:
+            status, text = http_request(
+                "POST",
+                token_url,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps(token_body).encode("utf-8"),
+            )
+            resp = json.loads(text) if text else {}
+        except BotError as exc:
+            if exc.status in {428, 403}:  # authorization_pending variants
+                print("Waiting for phone approval...", flush=True)
+                continue
+            # Some servers return 400 with JSON error
+            try:
+                resp = json.loads(exc.body)
+            except Exception:
+                raise
+
+        err = resp.get("error")
+        if err in {"authorization_pending", "slow_down"}:
+            if err == "slow_down":
+                interval += 2
+            print("Waiting for phone approval...", flush=True)
+            continue
+        if err:
+            raise BotError(f"Device login failed: {resp}")
+        if resp.get("access_token"):
+            print("Phone login successful.", flush=True)
+            if resp.get("refresh_token"):
+                print(
+                    "Optional: save this refresh token as secret "
+                    "YOUTUBE_REFRESH_TOKEN for unattended runs:",
+                    flush=True,
+                )
+                # Do not fail if missing — TV flow sometimes omits on re-auth
+                print(resp["refresh_token"], flush=True)
+            return {
+                "access_token": resp["access_token"],
+                "refresh_token": resp.get("refresh_token", ""),
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "expires_at": time.time() + float(resp.get("expires_in") or 3600),
+            }
+
+    raise BotError("Timed out waiting for phone login")
+
+
+def refresh_access_token(
+    client_id: str, client_secret: str, refresh_token: str
+) -> dict[str, Any]:
+    token_url = f"{ORIGIN}/o/oauth2/token"
+    resp = http_json(
+        "POST",
+        token_url,
+        body={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+    )
+    if not resp.get("access_token"):
+        # Try Google's token endpoint as fallback
+        resp = http_json(
+            "POST",
+            "https://oauth2.googleapis.com/token",
+            form={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+    if not resp.get("access_token"):
+        raise BotError(f"Refresh failed: {resp}")
+    return {
+        "access_token": resp["access_token"],
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "expires_at": time.time() + float(resp.get("expires_in") or 3600),
+    }
+
+
+def obtain_auth(args: argparse.Namespace) -> dict[str, Any]:
+    client_id = args.client_id or os.getenv("YOUTUBE_CLIENT_ID", "")
+    client_secret = args.client_secret or os.getenv("YOUTUBE_CLIENT_SECRET", "")
+    refresh = args.refresh_token or os.getenv("YOUTUBE_REFRESH_TOKEN", "")
+
+    if not client_id or not client_secret:
+        client_id, client_secret = scrape_tv_oauth_client()
+        print(f"Using TV OAuth client: {client_id[:24]}...", flush=True)
+
+    if refresh:
+        print("Using saved refresh token (no phone login this run)", flush=True)
+        return refresh_access_token(client_id, client_secret, refresh)
+
+    return device_login(
+        client_id=client_id,
+        client_secret=client_secret,
+        timeout_seconds=args.auth_timeout_seconds,
+    )
+
+
+# --- InnerTube + Data API ---
+
+
+class YouTubeMacro:
+    def __init__(self, auth: Optional[dict[str, Any]] = None) -> None:
+        self.auth = auth
+        self.api_key = DEFAULT_API_KEY
+        self.client_version = DEFAULT_CLIENT_VERSION
+        self._bootstrapped = False
+
+    @property
+    def access_token(self) -> str:
+        if not self.auth or not self.auth.get("access_token"):
+            raise BotError("Not authenticated")
+        if self.auth.get("expires_at", 0) < time.time() + 60:
+            refresh = self.auth.get("refresh_token") or ""
+            if not refresh:
+                raise BotError(
+                    "Access token expired and no refresh token is available. "
+                    "Re-run the workflow and complete phone login again."
+                )
+            self.auth = refresh_access_token(
+                self.auth["client_id"],
+                self.auth["client_secret"],
+                refresh,
+            )
+        return str(self.auth["access_token"])
+
+    def bootstrap(self) -> None:
+        if self._bootstrapped:
+            return
+        html = http_get_text(f"{ORIGIN}/")
+        cfg = extract_ytcfg(html)
+        self.api_key = cfg.get("INNERTUBE_API_KEY", self.api_key)
+        self.client_version = cfg.get(
+            "INNERTUBE_CLIENT_VERSION", self.client_version
+        )
+        self._bootstrapped = True
+
+    def innertube(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        authed: bool = False,
+        tv_client: bool = False,
+    ) -> dict[str, Any]:
+        self.bootstrap()
+        if tv_client:
+            client = {
+                "clientName": "TVHTML5",
+                "clientVersion": TV_CLIENT_VERSION,
+                "hl": "en",
+                "gl": "US",
+                "userAgent": TV_USER_AGENT,
+            }
+        else:
+            client = {
+                "clientName": "WEB",
+                "clientVersion": self.client_version,
+                "hl": "en",
+                "gl": "US",
+                "userAgent": USER_AGENT,
+            }
+        body = {"context": {"client": client}, **payload}
+        url = f"{ORIGIN}/youtubei/v1/{path}?prettyPrint=false&key={self.api_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Youtube-Client-Name": "7" if tv_client else "1",
+            "X-Youtube-Client-Version": (
+                TV_CLIENT_VERSION if tv_client else self.client_version
+            ),
+        }
+        if authed:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+            headers["X-Origin"] = ORIGIN
+        status, text = http_request(
+            "POST", url, headers=headers, body=json.dumps(body).encode("utf-8")
+        )
+        try:
+            return json.loads(text) if text else {}
+        except json.JSONDecodeError as exc:
+            raise BotError(f"Invalid InnerTube JSON ({status}): {text[:200]}") from exc
+
+    def resolve_video_from_channel(self, channel: str) -> str:
+        handle = extract_channel_handle(channel)
+        channel_id = extract_channel_id(channel)
+        if handle:
+            final = http_get_final_url(f"{ORIGIN}/@{handle}/live")
+            video_id = extract_video_id(final)
+            if video_id:
+                return video_id
+            html = http_get_text(f"{ORIGIN}/@{handle}/streams")
+            video_id = _find_live_video_in_html(html)
+            if video_id:
+                return video_id
+            raise BotError(f"No active livestream for @{handle}")
+        if channel_id:
+            final = http_get_final_url(f"{ORIGIN}/channel/{channel_id}/live")
+            video_id = extract_video_id(final)
+            if video_id:
+                return video_id
+            raise BotError(f"No active livestream for {channel_id}")
+        return self.resolve_video_from_channel("@" + channel.lstrip("@"))
+
+    def resolve_ids(self, video: str, channel: str) -> tuple[str, str]:
+        video_id = extract_video_id(video) if video else None
+        if not video_id and channel:
+            video_id = self.resolve_video_from_channel(channel)
+        if not video_id:
+            raise BotError("Provide --video or --channel")
+
+        html = http_get_text(f"{ORIGIN}/watch?v={video_id}")
+        cfg = extract_ytcfg(html)
+        if cfg.get("INNERTUBE_API_KEY"):
+            self.api_key = cfg["INNERTUBE_API_KEY"]
+        if cfg.get("INNERTUBE_CLIENT_VERSION"):
+            self.client_version = cfg["INNERTUBE_CLIENT_VERSION"]
+        self._bootstrapped = True
+
+        channel_id = None
+        player = extract_json_assignment(html, "ytInitialPlayerResponse")
+        if player:
+            details = player.get("videoDetails") or {}
+            channel_id = details.get("channelId")
+            micro = (player.get("microformat") or {}).get(
+                "playerMicroformatRenderer"
+            ) or {}
+            channel_id = channel_id or micro.get("externalChannelId")
+
+        if not channel_id:
+            data = self.innertube("player", {"videoId": video_id}, authed=False)
+            channel_id = (data.get("videoDetails") or {}).get("channelId")
+
+        if not channel_id:
+            raise BotError(f"Could not resolve channelId for {video_id}")
+        return video_id, str(channel_id)
+
+    def get_live_chat_id(self, video_id: str) -> str:
+        """Data API: videos.list → activeLiveChatId."""
+        url = (
+            f"{YOUTUBE_API}/videos?"
+            + urllib.parse.urlencode(
+                {"part": "liveStreamingDetails,snippet", "id": video_id}
+            )
+        )
+        data = http_json(
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {self.access_token}"},
+        )
+        items = data.get("items") or []
+        if not items:
+            raise BotError(f"Video not found via Data API: {video_id}", body=str(data))
+        details = items[0].get("liveStreamingDetails") or {}
+        chat_id = details.get("activeLiveChatId")
+        if not chat_id:
+            title = (items[0].get("snippet") or {}).get("title", video_id)
+            raise BotError(
+                f"No active live chat for {video_id!r} ({title}). Is it live?"
+            )
+        return str(chat_id)
+
+    def send_via_data_api(self, live_chat_id: str, message: str) -> dict[str, Any]:
+        url = f"{YOUTUBE_API}/liveChat/messages?part=snippet"
+        return http_json(
+            "POST",
+            url,
+            headers={"Authorization": f"Bearer {self.access_token}"},
+            body={
+                "snippet": {
+                    "liveChatId": live_chat_id,
+                    "type": "textMessageEvent",
+                    "textMessageDetails": {"messageText": message},
+                }
+            },
+        )
+
+    def send_via_innertube(
+        self, channel_id: str, video_id: str, message: str
+    ) -> dict[str, Any]:
+        payload = {
+            "params": send_message_params(channel_id, video_id),
+            "richMessage": {"textSegments": [{"text": message}]},
+            "clientMessageId": str(uuid.uuid4()),
+        }
+        data = self.innertube(
+            "live_chat/send_message",
+            payload,
+            authed=True,
+            tv_client=True,
+        )
+        if data.get("timeoutDurationUsec"):
+            usec = int(data["timeoutDurationUsec"])
+            raise BotError(f"Timed out from chat for ~{usec // 1_000_000}s")
+        actions = data.get("actions") or []
+        if not actions:
+            raise BotError(
+                "InnerTube send returned no actions",
+                body=json.dumps(data)[:800],
+            )
+        toast = json.dumps(actions)
+        if "Error, try again" in toast and "liveChatTextMessageRenderer" not in toast:
+            raise BotError("InnerTube send rejected", body=toast[:800])
+        return data
+
+    def send_message(
+        self,
+        *,
+        channel_id: str,
+        video_id: str,
+        live_chat_id: Optional[str],
+        message: str,
+    ) -> str:
+        message = message.replace("\r", " ").replace("\n", " ").strip()
+        if not message:
+            raise ValueError("empty message")
+        if len(message) > 200:
+            raise ValueError("message too long (>200)")
+
+        # Prefer Data API; fall back to InnerTube TV send.
+        if live_chat_id:
+            try:
+                self.send_via_data_api(live_chat_id, message)
+                return "data_api"
+            except BotError as exc:
+                print(f"Data API send failed ({exc}); trying InnerTube...", flush=True)
+
+        self.send_via_innertube(channel_id, video_id, message)
+        return "innertube"
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Send a YouTube live chat command via InnerTube on an interval."
+        description=(
+            "Send a YouTube live chat command on an interval. "
+            "Uses phone device login by default (no secrets required)."
+        )
     )
-    parser.add_argument(
-        "--video",
-        default=os.getenv("YOUTUBE_VIDEO", ""),
-        help="Live video URL or 11-char video ID (preferred)",
-    )
-    parser.add_argument(
-        "--channel",
-        default=os.getenv("YOUTUBE_CHANNEL", ""),
-        help="Channel @handle, ID, or URL (finds current /live)",
-    )
-    parser.add_argument(
-        "--command",
-        default=os.getenv("COMMAND", ""),
-        help="Chat message or command to send",
-    )
+    parser.add_argument("--video", default=os.getenv("YOUTUBE_VIDEO", ""))
+    parser.add_argument("--channel", default=os.getenv("YOUTUBE_CHANNEL", ""))
+    parser.add_argument("--command", default=os.getenv("COMMAND", ""))
     parser.add_argument(
         "--interval-seconds",
         type=float,
         default=float(os.getenv("INTERVAL_SECONDS", "60")),
-        help="Seconds between sends (default: 60)",
     )
     parser.add_argument(
         "--duration-minutes",
         type=float,
         default=float(os.getenv("DURATION_MINUTES", "30")),
-        help="How long to keep sending (default: 30)",
     )
     parser.add_argument(
-        "--count",
-        type=int,
-        default=int(os.getenv("SEND_COUNT", "0")),
-        help="Optional max number of sends (0 = until duration ends)",
+        "--count", type=int, default=int(os.getenv("SEND_COUNT", "0"))
     )
     parser.add_argument(
-        "--cookies",
-        default=os.getenv("YOUTUBE_COOKIES", ""),
-        help="Logged-in YouTube Cookie header value",
+        "--auth-timeout-seconds",
+        type=float,
+        default=float(os.getenv("AUTH_TIMEOUT_SECONDS", "600")),
+        help="How long to wait for phone device login",
+    )
+    parser.add_argument(
+        "--client-id", default=os.getenv("YOUTUBE_CLIENT_ID", "")
+    )
+    parser.add_argument(
+        "--client-secret", default=os.getenv("YOUTUBE_CLIENT_SECRET", "")
+    )
+    parser.add_argument(
+        "--refresh-token", default=os.getenv("YOUTUBE_REFRESH_TOKEN", "")
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         default=os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"},
-        help="Log sends without calling YouTube",
     )
     return parser.parse_args(argv)
 
@@ -523,11 +733,9 @@ def validate(args: argparse.Namespace) -> None:
     if not args.video and not args.channel:
         raise SystemExit("Provide --video and/or --channel")
     if args.interval_seconds < 1:
-        raise SystemExit("interval-seconds must be >= 1 (avoid spam / rate limits)")
+        raise SystemExit("interval-seconds must be >= 1")
     if args.duration_minutes <= 0 and args.count <= 0:
         raise SystemExit("Set a positive duration-minutes and/or count")
-    if not args.dry_run and not args.cookies:
-        raise SystemExit("Missing --cookies / YOUTUBE_COOKIES")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -545,13 +753,25 @@ def run(args: argparse.Namespace) -> int:
     )
     print(f"Command: {args.command!r}", flush=True)
 
-    session = InnerTubeSession(cookie_header=args.cookies, dry_run=args.dry_run)
+    bot = YouTubeMacro()
     video_id = extract_video_id(args.video) or "dry-run-video"
     channel_id = "dry-run-channel"
+    live_chat_id: Optional[str] = None
 
     if not args.dry_run:
-        video_id, channel_id = session.resolve_ids(args.video, args.channel)
+        auth = obtain_auth(args)
+        bot = YouTubeMacro(auth)
+        video_id, channel_id = bot.resolve_ids(args.video, args.channel)
         print(f"Resolved video={video_id} channel={channel_id}", flush=True)
+        try:
+            live_chat_id = bot.get_live_chat_id(video_id)
+            print(f"liveChatId={live_chat_id}", flush=True)
+        except BotError as exc:
+            print(
+                f"Data API liveChatId unavailable ({exc}); "
+                "will use InnerTube send only",
+                flush=True,
+            )
 
     sent = 0
     try:
@@ -564,15 +784,18 @@ def run(args: argparse.Namespace) -> int:
                 break
 
             if args.dry_run:
-                params = send_message_params("UCabcdefghijklmnopqrstuv", video_id)
                 print(
-                    f"[dry-run] would InnerTube send to {video_id}: {args.command} "
-                    f"(params_len={len(params)})",
+                    f"[dry-run] would send to {video_id}: {args.command}",
                     flush=True,
                 )
             else:
-                session.send_message(channel_id, video_id, args.command)
-                print(f"Sent #{sent + 1}: {args.command}", flush=True)
+                via = bot.send_message(
+                    channel_id=channel_id,
+                    video_id=video_id,
+                    live_chat_id=live_chat_id,
+                    message=args.command,
+                )
+                print(f"Sent #{sent + 1} via {via}: {args.command}", flush=True)
 
             sent += 1
 
@@ -590,7 +813,7 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("Interrupted", flush=True)
         return 130
-    except InnerTubeError as exc:
+    except BotError as exc:
         print(f"Error: {exc}", flush=True)
         if exc.body:
             print(exc.body[:1000], flush=True)
