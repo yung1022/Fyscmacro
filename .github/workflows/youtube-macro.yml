@@ -1,0 +1,113 @@
+name: YouTube Live Chat Macro
+
+on:
+  workflow_dispatch:
+    inputs:
+      video:
+        description: "Live video URL or ID (preferred)"
+        required: false
+        type: string
+        default: ""
+      channel:
+        description: "Channel @handle / ID / URL (uses /live if video empty)"
+        required: false
+        type: string
+        default: ""
+      command:
+        description: "Chat message or command to send"
+        required: true
+        type: string
+      interval_seconds:
+        description: "Seconds between each send (min 1; respect chat rules)"
+        required: true
+        type: string
+        default: "60"
+      duration_minutes:
+        description: "How long the bot should keep sending"
+        required: true
+        type: string
+        default: "30"
+      send_count:
+        description: "Optional max sends (0 = until duration ends)"
+        required: false
+        type: string
+        default: "0"
+      dry_run:
+        description: "Log only; do not call YouTube"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: youtube-macro
+  cancel-in-progress: true
+
+jobs:
+  send-command:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate inputs
+        env:
+          YOUTUBE_VIDEO: ${{ inputs.video }}
+          YOUTUBE_CHANNEL: ${{ inputs.channel }}
+          COMMAND: ${{ inputs.command }}
+          INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+          SEND_COUNT: ${{ inputs.send_count }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          video = os.environ.get("YOUTUBE_VIDEO", "").strip()
+          channel = os.environ.get("YOUTUBE_CHANNEL", "").strip()
+          command = os.environ["COMMAND"].strip()
+          interval = float(os.environ["INTERVAL_SECONDS"])
+          duration = float(os.environ["DURATION_MINUTES"])
+          count = int(float(os.environ.get("SEND_COUNT") or "0"))
+          if not video and not channel:
+              sys.exit("Provide video and/or channel")
+          if not command:
+              sys.exit("command is required")
+          if interval < 1:
+              sys.exit("interval_seconds must be >= 1")
+          if duration <= 0 and count <= 0:
+              sys.exit("duration_minutes or send_count must be positive")
+          if duration > 360:
+              sys.exit("duration_minutes cannot exceed 360 (GitHub Actions job limit)")
+          print("inputs ok")
+          PY
+
+      - name: Check cookies secret
+        if: ${{ inputs.dry_run == false }}
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -z "$YOUTUBE_COOKIES" ]; then
+            echo "::error::Add repository secret YOUTUBE_COOKIES (logged-in YouTube Cookie header)"
+            echo "Must include SAPISID (or __Secure-3PAPISID). See README."
+            exit 1
+          fi
+          if ! printf '%s' "$YOUTUBE_COOKIES" | grep -Eq 'SAPISID=|__Secure-3PAPISID=|__Secure-1PAPISID='; then
+            echo "::error::YOUTUBE_COOKIES missing SAPISID / __Secure-3PAPISID"
+            exit 1
+          fi
+
+      - name: Run InnerTube macro bot
+        env:
+          YOUTUBE_VIDEO: ${{ inputs.video }}
+          YOUTUBE_CHANNEL: ${{ inputs.channel }}
+          COMMAND: ${{ inputs.command }}
+          INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+          SEND_COUNT: ${{ inputs.send_count }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python bot/youtube_macro.py
