@@ -1,18 +1,24 @@
-name: Twitch Chat Macro
+name: YouTube Live Chat Macro
 
 on:
   workflow_dispatch:
     inputs:
-      channel:
-        description: "Twitch channel to join (without #)"
-        required: true
+      video:
+        description: "Live video URL or ID (preferred)"
+        required: false
         type: string
+        default: ""
+      channel:
+        description: "Channel @handle, ID, or URL (used if video empty; finds current live)"
+        required: false
+        type: string
+        default: ""
       command:
         description: "Chat message or command to send"
         required: true
         type: string
       interval_seconds:
-        description: "Seconds between each send (min 1; respect channel rules)"
+        description: "Seconds between each send (min 1; respect chat rules)"
         required: true
         type: string
         default: "60"
@@ -27,14 +33,13 @@ on:
         type: string
         default: "0"
       dry_run:
-        description: "Log only; do not connect to Twitch"
+        description: "Log only; do not call YouTube"
         required: false
         type: boolean
         default: false
 
-# Long-running chat loop — cancel previous run for this workflow when re-triggered
 concurrency:
-  group: twitch-macro
+  group: youtube-macro
   cancel-in-progress: true
 
 jobs:
@@ -52,7 +57,8 @@ jobs:
 
       - name: Validate inputs
         env:
-          CHANNEL: ${{ inputs.channel }}
+          YOUTUBE_VIDEO: ${{ inputs.video }}
+          YOUTUBE_CHANNEL: ${{ inputs.channel }}
           COMMAND: ${{ inputs.command }}
           INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
@@ -60,20 +66,20 @@ jobs:
         run: |
           python - <<'PY'
           import os, sys
-          channel = os.environ["CHANNEL"].strip()
+          video = os.environ.get("YOUTUBE_VIDEO", "").strip()
+          channel = os.environ.get("YOUTUBE_CHANNEL", "").strip()
           command = os.environ["COMMAND"].strip()
           interval = float(os.environ["INTERVAL_SECONDS"])
           duration = float(os.environ["DURATION_MINUTES"])
           count = int(float(os.environ.get("SEND_COUNT") or "0"))
-          if not channel:
-              sys.exit("channel is required")
+          if not video and not channel:
+              sys.exit("Provide video and/or channel")
           if not command:
               sys.exit("command is required")
           if interval < 1:
               sys.exit("interval_seconds must be >= 1")
           if duration <= 0 and count <= 0:
               sys.exit("duration_minutes or send_count must be positive")
-          # GitHub Actions hard cap ~6h; warn via exit if over
           if duration > 360:
               sys.exit("duration_minutes cannot exceed 360 (GitHub Actions job limit)")
           print("inputs ok")
@@ -82,23 +88,32 @@ jobs:
       - name: Check secrets
         if: ${{ inputs.dry_run == false }}
         env:
-          TWITCH_USERNAME: ${{ secrets.TWITCH_USERNAME }}
-          TWITCH_OAUTH_TOKEN: ${{ secrets.TWITCH_OAUTH_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
         run: |
-          if [ -z "$TWITCH_USERNAME" ] || [ -z "$TWITCH_OAUTH_TOKEN" ]; then
-            echo "::error::Add repository secrets TWITCH_USERNAME and TWITCH_OAUTH_TOKEN"
-            echo "Get a chat token from https://twitchtokengenerator.com (scope: chat:send) or https://dev.twitch.tv/"
+          missing=0
+          for name in YOUTUBE_CLIENT_ID YOUTUBE_CLIENT_SECRET YOUTUBE_REFRESH_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "See README for OAuth setup (Google Cloud + youtube.force-ssl scope)."
             exit 1
           fi
 
       - name: Run macro bot
         env:
-          TWITCH_CHANNEL: ${{ inputs.channel }}
+          YOUTUBE_VIDEO: ${{ inputs.video }}
+          YOUTUBE_CHANNEL: ${{ inputs.channel }}
           COMMAND: ${{ inputs.command }}
           INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           SEND_COUNT: ${{ inputs.send_count }}
-          TWITCH_USERNAME: ${{ secrets.TWITCH_USERNAME }}
-          TWITCH_OAUTH_TOKEN: ${{ secrets.TWITCH_OAUTH_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: python bot/twitch_macro.py
+        run: python bot/youtube_macro.py
