@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       channel:
-        description: "Channel @handle, ID, or URL (used if video empty; finds current live)"
+        description: "Channel @handle / ID / URL (uses /live if video empty)"
         required: false
         type: string
         default: ""
@@ -85,26 +85,22 @@ jobs:
           print("inputs ok")
           PY
 
-      - name: Check secrets
+      - name: Check cookies secret
         if: ${{ inputs.dry_run == false }}
         env:
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
-          missing=0
-          for name in YOUTUBE_CLIENT_ID YOUTUBE_CLIENT_SECRET YOUTUBE_REFRESH_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing repository secret $name"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "See README for OAuth setup (Google Cloud + youtube.force-ssl scope)."
+          if [ -z "$YOUTUBE_COOKIES" ]; then
+            echo "::error::Add repository secret YOUTUBE_COOKIES (logged-in YouTube Cookie header)"
+            echo "Must include SAPISID (or __Secure-3PAPISID). See README."
+            exit 1
+          fi
+          if ! printf '%s' "$YOUTUBE_COOKIES" | grep -Eq 'SAPISID=|__Secure-3PAPISID=|__Secure-1PAPISID='; then
+            echo "::error::YOUTUBE_COOKIES missing SAPISID / __Secure-3PAPISID"
             exit 1
           fi
 
-      - name: Run macro bot
+      - name: Run InnerTube macro bot
         env:
           YOUTUBE_VIDEO: ${{ inputs.video }}
           YOUTUBE_CHANNEL: ${{ inputs.channel }}
@@ -112,8 +108,6 @@ jobs:
           INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           SEND_COUNT: ${{ inputs.send_count }}
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: python bot/youtube_macro.py

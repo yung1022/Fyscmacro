@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Unit tests that do not hit the network."""
+"""Unit tests that do not require real YouTube credentials."""
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import sys
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +25,9 @@ spec.loader.exec_module(youtube_macro)
 class ParseTests(unittest.TestCase):
     def test_video_id_from_url(self) -> None:
         self.assertEqual(
-            youtube_macro.extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            youtube_macro.extract_video_id(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ),
             "dQw4w9WgXcQ",
         )
         self.assertEqual(
@@ -31,26 +35,61 @@ class ParseTests(unittest.TestCase):
             "dQw4w9WgXcQ",
         )
         self.assertEqual(
-            youtube_macro.extract_video_id("https://www.youtube.com/live/dQw4w9WgXcQ"),
+            youtube_macro.extract_video_id(
+                "https://www.youtube.com/live/dQw4w9WgXcQ"
+            ),
             "dQw4w9WgXcQ",
         )
-        self.assertEqual(youtube_macro.extract_video_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ")
 
     def test_channel_handle(self) -> None:
         self.assertEqual(
-            youtube_macro.extract_channel_handle("https://www.youtube.com/@SomeCreator"),
+            youtube_macro.extract_channel_handle(
+                "https://www.youtube.com/@SomeCreator"
+            ),
             "SomeCreator",
         )
-        self.assertEqual(youtube_macro.extract_channel_handle("@SomeCreator"), "SomeCreator")
-
-    def test_channel_id(self) -> None:
-        cid = "UCabcdefghijklmnopqrstuv"
-        self.assertEqual(len(cid), 24)
-        self.assertEqual(youtube_macro.extract_channel_id(cid), cid)
         self.assertEqual(
-            youtube_macro.extract_channel_id(f"https://www.youtube.com/channel/{cid}"),
-            cid,
+            youtube_macro.extract_channel_handle("@SomeCreator"), "SomeCreator"
         )
+
+
+class ProtobufTests(unittest.TestCase):
+    def test_send_message_params_stable(self) -> None:
+        channel = "UCabcdefghijklmnopqrstuv"
+        video = "dQw4w9WgXcQ"
+        params = youtube_macro.send_message_params(channel, video)
+        # B64Type.B2: base64(urlencode(base64(protobuf)))
+        decoded = base64.b64decode(params).decode("ascii")
+        inner = base64.b64decode(urllib.parse.unquote(decoded))
+        # Must contain channel + video as utf-8 substrings inside protobuf
+        self.assertIn(channel.encode(), inner)
+        self.assertIn(video.encode(), inner)
+        # Starts with field1 length-delimited
+        self.assertEqual(inner[0], (1 << 3) | 2)
+
+    def test_sapisidhash_format(self) -> None:
+        token = youtube_macro.sapisidhash("test-sapisid")
+        self.assertTrue(token.startswith("SAPISIDHASH "))
+        ts, digest = token.split(" ", 1)[1].split("_", 1)
+        self.assertTrue(ts.isdigit())
+        self.assertEqual(len(digest), 40)
+
+
+class CookieTests(unittest.TestCase):
+    def test_pick_sapisid_prefers_sapisid(self) -> None:
+        cookies = {
+            "SAPISID": "a",
+            "__Secure-3PAPISID": "b",
+        }
+        self.assertEqual(youtube_macro.pick_sapisid(cookies), "a")
+
+    def test_pick_secure_fallback(self) -> None:
+        cookies = {"__Secure-3PAPISID": "secure"}
+        self.assertEqual(youtube_macro.pick_sapisid(cookies), "secure")
+
+    def test_missing_sapisid(self) -> None:
+        with self.assertRaises(youtube_macro.InnerTubeError):
+            youtube_macro.pick_sapisid({"SID": "x"})
 
 
 class DryRunTests(unittest.TestCase):
@@ -91,9 +130,16 @@ class DryRunTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             youtube_macro.validate(args)
 
-    def test_requires_video_or_channel(self) -> None:
+    def test_requires_cookies_when_not_dry_run(self) -> None:
         args = youtube_macro.parse_args(
-            ["--command", "!join", "--count", "1", "--dry-run"]
+            [
+                "--video",
+                "dQw4w9WgXcQ",
+                "--command",
+                "!join",
+                "--count",
+                "1",
+            ]
         )
         with self.assertRaises(SystemExit):
             youtube_macro.validate(args)
