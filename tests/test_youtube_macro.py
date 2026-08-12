@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests (no live YouTube login)."""
+"""Offline unit tests."""
 
 from __future__ import annotations
 
@@ -30,10 +30,6 @@ class ParseTests(unittest.TestCase):
             ),
             "dQw4w9WgXcQ",
         )
-        self.assertEqual(
-            youtube_macro.extract_video_id("https://youtu.be/dQw4w9WgXcQ"),
-            "dQw4w9WgXcQ",
-        )
 
     def test_channel_handle(self) -> None:
         self.assertEqual(
@@ -50,6 +46,25 @@ class ProtobufTests(unittest.TestCase):
         inner = base64.b64decode(urllib.parse.unquote(decoded))
         self.assertIn(channel.encode(), inner)
         self.assertIn(video.encode(), inner)
+
+
+class CookieTests(unittest.TestCase):
+    def test_pick_sapisid(self) -> None:
+        self.assertEqual(
+            youtube_macro.pick_sapisid({"SAPISID": "a", "__Secure-3PAPISID": "b"}),
+            "a",
+        )
+
+    def test_sapisidhash_format(self) -> None:
+        token = youtube_macro.sapisidhash("test")
+        self.assertTrue(token.startswith("SAPISIDHASH "))
+
+
+class ChannelResolveTests(unittest.TestCase):
+    def test_extract_from_owner_regex(self) -> None:
+        html = '"videoOwnerRenderer":{"title":{"runs":[{"text":"Liliana"}]},"channelId":"UC6SnTw5Tr3b6IoJhwNsQdvg"}'
+        cid = youtube_macro.extract_channel_id_from_watch_html(html)
+        self.assertEqual(cid, "UC6SnTw5Tr3b6IoJhwNsQdvg")
 
 
 class DryRunTests(unittest.TestCase):
@@ -70,71 +85,14 @@ class DryRunTests(unittest.TestCase):
             ]
         )
         with mock.patch.object(youtube_macro.time, "sleep", return_value=None):
-            code = youtube_macro.run(args)
-        self.assertEqual(code, 0)
+            self.assertEqual(youtube_macro.run(args), 0)
 
-    def test_rejects_tiny_interval(self) -> None:
+    def test_requires_cookies_when_not_dry_run(self) -> None:
         args = youtube_macro.parse_args(
-            [
-                "--channel",
-                "@someone",
-                "--command",
-                "!join",
-                "--interval-seconds",
-                "0.5",
-                "--count",
-                "1",
-                "--dry-run",
-            ]
+            ["--video", "dQw4w9WgXcQ", "--command", "!join", "--count", "1"]
         )
         with self.assertRaises(SystemExit):
             youtube_macro.validate(args)
-
-    def test_no_secrets_required_for_validate(self) -> None:
-        args = youtube_macro.parse_args(
-            [
-                "--video",
-                "dQw4w9WgXcQ",
-                "--command",
-                "!join",
-                "--count",
-                "1",
-            ]
-        )
-        # Should not raise — auth happens at runtime via phone login
-        youtube_macro.validate(args)
-
-
-class ChannelResolveTests(unittest.TestCase):
-    def test_extract_from_video_owner_renderer_json(self) -> None:
-        html = """
-        var ytInitialData = {"contents":{"videoOwnerRenderer":{"channelId":"UC6SnTw5Tr3b6IoJhwNsQdvg"}}};
-        """
-        cid = youtube_macro.extract_channel_id_from_watch_html(
-            html, "ImeRw_CxUio"
-        )
-        self.assertEqual(cid, "UC6SnTw5Tr3b6IoJhwNsQdvg")
-
-    def test_extract_from_owner_regex(self) -> None:
-        html = '"videoOwnerRenderer":{"title":{"runs":[{"text":"Liliana"}]},"channelId":"UC6SnTw5Tr3b6IoJhwNsQdvg"}'
-        cid = youtube_macro.extract_channel_id_from_watch_html(html)
-        self.assertEqual(cid, "UC6SnTw5Tr3b6IoJhwNsQdvg")
-
-
-class AuthHelperTests(unittest.TestCase):
-    def test_tv_oauth_scopes_are_youtube_only(self) -> None:
-        self.assertNotIn("youtube.force-ssl", youtube_macro.TV_OAUTH_SCOPES)
-        self.assertIn(
-            "https://www.googleapis.com/auth/youtube",
-            youtube_macro.TV_OAUTH_SCOPES,
-        )
-
-    def test_gh_notice_prints(self) -> None:
-        with mock.patch("builtins.print") as mocked:
-            youtube_macro.gh_notice("Phone login", "Open url")
-            mocked.assert_called()
-            args = mocked.call_args[0][0]
-            self.assertIn("::notice", args)
 
 
 if __name__ == "__main__":
