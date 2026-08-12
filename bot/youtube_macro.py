@@ -34,6 +34,12 @@ USER_AGENT = (
 )
 TV_USER_AGENT = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 
+# YouTube TV device flow only accepts these scopes (not youtube.force-ssl).
+TV_OAUTH_SCOPES = (
+    "http://gdata.youtube.com "
+    "https://www.googleapis.com/auth/youtube-paid-content"
+)
+
 # Widely used YouTube TV OAuth client (fallback if /tv scrape fails)
 FALLBACK_TV_CLIENT_ID = (
     "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
@@ -296,6 +302,7 @@ def device_login(
     *,
     client_id: str,
     client_secret: str,
+    login_email: str = "",
     timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
     """YouTube TV device OAuth — authorize on your phone, no desktop needed."""
@@ -303,16 +310,19 @@ def device_login(
     token_url = f"{ORIGIN}/o/oauth2/token"
     payload = {
         "client_id": client_id,
-        "scope": (
-            "http://gdata.youtube.com "
-            "https://www.googleapis.com/auth/youtube "
-            "https://www.googleapis.com/auth/youtube.force-ssl "
-            "https://www.googleapis.com/auth/youtube-paid-content"
-        ),
+        "scope": TV_OAUTH_SCOPES,
         "device_id": str(uuid.uuid4()).replace("-", ""),
         "device_model": "ytlr::",
     }
-    data = http_json("POST", code_url, body=payload)
+    try:
+        data = http_json("POST", code_url, body=payload)
+    except BotError as exc:
+        if exc.status == 400:
+            raise BotError(
+                "Device login request rejected (HTTP 400). "
+                f"Details: {exc.body[:500]}"
+            ) from exc
+        raise
     if data.get("error") or data.get("error_code"):
         raise BotError(f"Device code request failed: {data}")
 
@@ -323,17 +333,21 @@ def device_login(
     expires_in = float(data.get("expires_in") or 1800)
     wait_for = min(timeout_seconds, expires_in - 5)
 
+    login_email = login_email.strip()
+    who = login_email if login_email else "pick your YouTube/Google account"
+
     print("", flush=True)
     print("=" * 60, flush=True)
     print("  PHONE LOGIN REQUIRED (no desktop / no cookies)", flush=True)
     print(f"  1) Open: {verification_url}", flush=True)
-    print(f"  2) Enter code: {user_code}", flush=True)
-    print("  3) Approve access with your YouTube account", flush=True)
+    print(f"  2) Enter code: [{user_code}]", flush=True)
+    print(f"  3) Login as: [{who}]", flush=True)
+    print("  4) Approve access when asked", flush=True)
     print("=" * 60, flush=True)
     print("", flush=True)
     gh_notice(
         "Phone login",
-        f"Open {verification_url} and enter code {user_code}",
+        f"Open {verification_url} | code [{user_code}] | login as [{who}]",
     )
 
     deadline = time.monotonic() + wait_for
@@ -354,13 +368,25 @@ def device_login(
             )
             resp = json.loads(text) if text else {}
         except BotError as exc:
-            if exc.status in {428, 403}:  # authorization_pending variants
+            resp: dict[str, Any] = {}
+            if exc.body:
+                try:
+                    resp = json.loads(exc.body)
+                except json.JSONDecodeError:
+                    if exc.status in {428, 403, 400}:
+                        print("Waiting for phone approval...", flush=True)
+                        continue
+                    raise
+            err = resp.get("error")
+            if err in {"authorization_pending", "slow_down"} or exc.status in {
+                428,
+                403,
+            }:
+                if err == "slow_down":
+                    interval += 2
                 print("Waiting for phone approval...", flush=True)
                 continue
-            # Some servers return 400 with JSON error
-            try:
-                resp = json.loads(exc.body)
-            except Exception:
+            if not resp:
                 raise
 
         err = resp.get("error")
@@ -433,6 +459,7 @@ def obtain_auth(args: argparse.Namespace) -> dict[str, Any]:
     client_id = args.client_id or os.getenv("YOUTUBE_CLIENT_ID", "")
     client_secret = args.client_secret or os.getenv("YOUTUBE_CLIENT_SECRET", "")
     refresh = args.refresh_token or os.getenv("YOUTUBE_REFRESH_TOKEN", "")
+    login_email = args.login_email or os.getenv("LOGIN_EMAIL", "")
 
     if not client_id or not client_secret:
         client_id, client_secret = scrape_tv_oauth_client()
@@ -445,6 +472,7 @@ def obtain_auth(args: argparse.Namespace) -> dict[str, Any]:
     return device_login(
         client_id=client_id,
         client_secret=client_secret,
+        login_email=login_email,
         timeout_seconds=args.auth_timeout_seconds,
     )
 
@@ -703,6 +731,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--count", type=int, default=int(os.getenv("SEND_COUNT", "0"))
+    )
+    parser.add_argument(
+        "--login-email",
+        default=os.getenv("LOGIN_EMAIL", ""),
+        help="Google/YouTube account email to sign in as (shown in login prompt)",
     )
     parser.add_argument(
         "--auth-timeout-seconds",
