@@ -122,9 +122,12 @@ class ChannelResolveTests(unittest.TestCase):
 
 
 class AuthHelperTests(unittest.TestCase):
-    def test_tv_oauth_scopes_exclude_force_ssl(self) -> None:
+    def test_tv_oauth_scopes_are_youtube_only(self) -> None:
         self.assertNotIn("youtube.force-ssl", youtube_macro.TV_OAUTH_SCOPES)
-        self.assertIn("gdata.youtube.com", youtube_macro.TV_OAUTH_SCOPES)
+        self.assertIn(
+            "https://www.googleapis.com/auth/youtube",
+            youtube_macro.TV_OAUTH_SCOPES,
+        )
 
     def test_gh_notice_prints(self) -> None:
         with mock.patch("builtins.print") as mocked:
