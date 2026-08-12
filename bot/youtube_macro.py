@@ -256,6 +256,83 @@ def _find_live_video_in_html(html: str) -> Optional[str]:
     return None
 
 
+def _channel_id_from_owner_renderer(obj: Any) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return None
+    owner = obj.get("videoOwnerRenderer")
+    if not isinstance(owner, dict):
+        return None
+    cid = owner.get("channelId")
+    if isinstance(cid, str) and cid.startswith("UC"):
+        return cid
+    nav = owner.get("navigationEndpoint")
+    if isinstance(nav, dict):
+        browse = nav.get("browseEndpoint") or {}
+        bid = browse.get("browseId")
+        if isinstance(bid, str) and bid.startswith("UC"):
+            return bid
+    return None
+
+
+def _walk_find_video_owner_channel_id(obj: Any) -> Optional[str]:
+    found = _channel_id_from_owner_renderer(obj)
+    if found:
+        return found
+    if isinstance(obj, dict):
+        for value in obj.values():
+            found = _walk_find_video_owner_channel_id(value)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _walk_find_video_owner_channel_id(item)
+            if found:
+                return found
+    return None
+
+
+def extract_channel_id_from_watch_html(
+    html: str, video_id: str = ""
+) -> Optional[str]:
+    """Resolve uploader channelId when player JSON is bot-blocked."""
+    player = extract_json_assignment(html, "ytInitialPlayerResponse")
+    if player:
+        details = player.get("videoDetails") or {}
+        cid = details.get("channelId")
+        if cid:
+            return str(cid)
+        micro = (player.get("microformat") or {}).get(
+            "playerMicroformatRenderer"
+        ) or {}
+        cid = micro.get("externalChannelId")
+        if cid:
+            return str(cid)
+
+    initial = extract_json_assignment(html, "ytInitialData")
+    if initial:
+        cid = _walk_find_video_owner_channel_id(initial)
+        if cid:
+            return cid
+
+    owner_match = re.search(
+        r'"videoOwnerRenderer"[\s\S]{0,2500}?"channelId"\s*:\s*"(UC[\w-]{22})"',
+        html,
+    )
+    if owner_match:
+        return owner_match.group(1)
+
+    if video_id:
+        near_video = re.search(
+            rf'"videoId"\s*:\s*"{re.escape(video_id)}"[\s\S]{{0,5000}}?'
+            r'"channelId"\s*:\s*"(UC[\w-]{22})"',
+            html,
+        )
+        if near_video:
+            return near_video.group(1)
+
+    return None
+
+
 def gh_notice(title: str, message: str) -> None:
     # GitHub Actions annotation (safe characters only)
     safe_title = title.replace("\n", " ").replace("%", "%25").replace(":", "%3A")
@@ -582,6 +659,46 @@ class YouTubeMacro:
             raise BotError(f"No active livestream for {channel_id}")
         return self.resolve_video_from_channel("@" + channel.lstrip("@"))
 
+    def resolve_channel_id(self, channel: str) -> Optional[str]:
+        """Resolve @handle / channel URL / UC id to a channelId."""
+        cid = extract_channel_id(channel)
+        if cid:
+            return cid
+        handle = extract_channel_handle(channel)
+        if not handle:
+            handle = channel.lstrip("@").strip()
+        if not handle:
+            return None
+        data = self.innertube(
+            "navigation/resolve_url",
+            {"url": f"{ORIGIN}/@{handle.lstrip('@')}"},
+            authed=False,
+        )
+        endpoint = data.get("endpoint") or {}
+        browse = endpoint.get("browseEndpoint") or {}
+        bid = browse.get("browseId")
+        return str(bid) if bid else None
+
+    def resolve_channel_via_oembed(self, video_id: str) -> Optional[str]:
+        try:
+            url = (
+                "https://www.youtube.com/oembed?"
+                + urllib.parse.urlencode(
+                    {
+                        "url": f"{ORIGIN}/watch?v={video_id}",
+                        "format": "json",
+                    }
+                )
+            )
+            data = http_json("GET", url)
+        except BotError:
+            return None
+        author_url = str(data.get("author_url") or "")
+        handle = extract_channel_handle(author_url)
+        if handle:
+            return self.resolve_channel_id("@" + handle)
+        return extract_channel_id(author_url)
+
     def resolve_ids(self, video: str, channel: str) -> tuple[str, str]:
         video_id = extract_video_id(video) if video else None
         if not video_id and channel:
@@ -597,22 +714,34 @@ class YouTubeMacro:
             self.client_version = cfg["INNERTUBE_CLIENT_VERSION"]
         self._bootstrapped = True
 
-        channel_id = None
-        player = extract_json_assignment(html, "ytInitialPlayerResponse")
-        if player:
-            details = player.get("videoDetails") or {}
-            channel_id = details.get("channelId")
-            micro = (player.get("microformat") or {}).get(
-                "playerMicroformatRenderer"
-            ) or {}
-            channel_id = channel_id or micro.get("externalChannelId")
+        channel_id = extract_channel_id_from_watch_html(html, video_id)
 
         if not channel_id:
-            data = self.innertube("player", {"videoId": video_id}, authed=False)
+            data = self.innertube(
+                "player",
+                {"videoId": video_id},
+                authed=bool(self.auth),
+            )
             channel_id = (data.get("videoDetails") or {}).get("channelId")
+            if not channel_id:
+                play = data.get("playabilityStatus") or {}
+                if play.get("status") == "LOGIN_REQUIRED":
+                    print(
+                        "Player API login required; using HTML/oEmbed fallbacks",
+                        flush=True,
+                    )
 
         if not channel_id:
-            raise BotError(f"Could not resolve channelId for {video_id}")
+            channel_id = self.resolve_channel_via_oembed(video_id)
+
+        if not channel_id and channel:
+            channel_id = self.resolve_channel_id(channel)
+
+        if not channel_id:
+            raise BotError(
+                f"Could not resolve channelId for {video_id}. "
+                "Try passing channel=@handle as well."
+            )
         return video_id, str(channel_id)
 
     def get_live_chat_id(self, video_id: str) -> str:

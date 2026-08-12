@@ -105,6 +105,22 @@ class DryRunTests(unittest.TestCase):
         youtube_macro.validate(args)
 
 
+class ChannelResolveTests(unittest.TestCase):
+    def test_extract_from_video_owner_renderer_json(self) -> None:
+        html = """
+        var ytInitialData = {"contents":{"videoOwnerRenderer":{"channelId":"UC6SnTw5Tr3b6IoJhwNsQdvg"}}};
+        """
+        cid = youtube_macro.extract_channel_id_from_watch_html(
+            html, "ImeRw_CxUio"
+        )
+        self.assertEqual(cid, "UC6SnTw5Tr3b6IoJhwNsQdvg")
+
+    def test_extract_from_owner_regex(self) -> None:
+        html = '"videoOwnerRenderer":{"title":{"runs":[{"text":"Liliana"}]},"channelId":"UC6SnTw5Tr3b6IoJhwNsQdvg"}'
+        cid = youtube_macro.extract_channel_id_from_watch_html(html)
+        self.assertEqual(cid, "UC6SnTw5Tr3b6IoJhwNsQdvg")
+
+
 class AuthHelperTests(unittest.TestCase):
     def test_tv_oauth_scopes_exclude_force_ssl(self) -> None:
         self.assertNotIn("youtube.force-ssl", youtube_macro.TV_OAUTH_SCOPES)
