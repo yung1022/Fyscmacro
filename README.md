@@ -1,53 +1,45 @@
 # Fyscmacro (FYSC)
 
-YouTube live chat macro on a timer you choose, via **GitHub Actions**.
+YouTube live chat macro on a timer you choose, via **GitHub Actions** + **InnerTube**.
 
-Uses **both**:
-- **InnerTube** — find the live video / channel (and InnerTube send fallback)
-- **YouTube Data API** — `liveChatMessages.insert` when the OAuth token allows it
+> YouTube blocked phone/TV **device OAuth** for live-chat send (and blocks that token from the public Data API). Sending now requires a logged-in **Cookie** header. You can get that from a phone — no desktop required.
 
-## No desktop. No required secrets.
+## Setup (phone-friendly)
 
-Auth is **YouTube TV device login** on your **phone**:
+1. On Android, install **[Kiwi Browser](https://kiwibrowser.com/)** (has DevTools).
+2. Open an **incognito** tab → sign into **YouTube**.
+3. Kiwi menu → **Developer tools** → **Network**.
+4. Load any `youtube.com` page → tap a request → **Request Headers** → copy **Cookie**.
+5. Close the incognito tab.
+6. GitHub repo → **Settings → Secrets and variables → Actions** → add:
 
-1. Start **Actions → YouTube Live Chat Macro → Run workflow**
-2. Open the running job log
-3. You will see:
-   - `Enter code: [ABC-DEF-GHI]`
-   - `Login as: [your.email@gmail.com]` (set `login_email` in the workflow if you have multiple Google accounts)
-4. Open the URL on your phone, enter the code, pick that account, approve
-5. The job continues and sends your command on the interval
+| Secret | Value |
+| --- | --- |
+| `YOUTUBE_COOKIES` | Full Cookie string (must include `SAPISID` or `__Secure-3PAPISID`) |
 
-You do **not** need to copy browser cookies or create a Google Cloud project for the default path.
+The Google account behind those cookies is the account that posts in chat.
 
-## Workflow inputs
+Cookies expire — if sends fail, copy a fresh Cookie string.
+
+## Run
+
+**Actions → YouTube Live Chat Macro → Run workflow**
 
 | Input | Example | Meaning |
 | --- | --- | --- |
-| `video` | live URL or ID | Preferred target |
-| `channel` | `@SomeCreator` | Uses `/live` if `video` empty |
-| `command` | `!join` | Chat text to send |
+| `video` | live URL or `ImeRw_CxUio` | Preferred target |
+| `channel` | `@SomeCreator` | Used if `video` empty |
+| `command` | `!join` | Chat text |
 | `interval_seconds` | `60` | Wait between sends |
-| `duration_minutes` | `30` | How long to run (max 360) |
+| `duration_minutes` | `30` | Run length (max 360) |
 | `send_count` | `0` | Optional cap |
-| `auth_timeout_seconds` | `600` | How long to wait for phone login |
-| `login_email` | `you@gmail.com` | **Which account to sign in as** (shown as `Login as: [email]`) |
-| `dry_run` | `false` | Skip login/sends |
+| `dry_run` | `false` | Skip sends |
 
-## Optional: skip phone login next time
-
-After a successful login the log may print a **refresh token**. If you want unattended runs, add these repo secrets (optional):
-
-| Secret | When |
-| --- | --- |
-| `YOUTUBE_REFRESH_TOKEN` | From a previous successful login log |
-| `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` | Only if you override the auto TV client |
-
-If those secrets are missing, each run just asks you to approve on your phone again.
-
-## Local run
+## Local
 
 ```bash
+export YOUTUBE_COOKIES='SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...'
+
 python3 bot/youtube_macro.py \
   --video 'https://www.youtube.com/watch?v=VIDEO_ID' \
   --command '!join' \
@@ -67,13 +59,6 @@ python3 bot/youtube_macro.py --video dQw4w9WgXcQ --command '!join' --count 3 --d
 python3 -m unittest tests/test_youtube_macro.py -v
 ```
 
-## Notes
+## Why not phone OAuth alone?
 
-- Follow YouTube + channel chat rules; short intervals can get you timed out.
-- Device codes expire (~30 minutes); raise `auth_timeout_seconds` if you need longer.
-- Prefer a **video URL** when the stream is already open.
-
-After this fix, phone login uses Google’s device OAuth with the
-`youtube` scope (so Data API chat send works), and InnerTube OAuth
-requests no longer mix the public WEB API key with your Bearer token
-(that mismatch caused `FAILED_PRECONDITION`).
+YouTube returns **403** on Data API and **400** on InnerTube `live_chat/send_message` for TV device-OAuth tokens. Cookie + `SAPISIDHASH` is what the web client uses to post chat.

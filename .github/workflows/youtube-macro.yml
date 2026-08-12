@@ -32,18 +32,8 @@ on:
         required: false
         type: string
         default: "0"
-      auth_timeout_seconds:
-        description: "Seconds to wait for phone device login"
-        required: false
-        type: string
-        default: "600"
-      login_email:
-        description: "Google/YouTube email to sign in as (shown as Login as: [email])"
-        required: false
-        type: string
-        default: ""
       dry_run:
-        description: "Log only; skip login and YouTube sends"
+        description: "Log only; skip YouTube sends"
         required: false
         type: boolean
         default: false
@@ -95,7 +85,26 @@ jobs:
           print("inputs ok")
           PY
 
-      - name: Run macro (phone login if needed)
+      - name: Check YOUTUBE_COOKIES secret
+        if: ${{ inputs.dry_run == false }}
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -z "$YOUTUBE_COOKIES" ]; then
+            echo "::error::Add repository secret YOUTUBE_COOKIES"
+            echo "Phone OAuth can no longer send YouTube live chat."
+            echo "Copy Cookie header from a logged-in YouTube session."
+            echo "On Android: install Kiwi Browser → sign into YouTube →"
+            echo "Developer tools → Network → any youtube.com request → Cookie."
+            echo "Must include SAPISID or __Secure-3PAPISID."
+            exit 1
+          fi
+          if ! printf '%s' "$YOUTUBE_COOKIES" | grep -Eq 'SAPISID=|__Secure-3PAPISID=|__Secure-1PAPISID='; then
+            echo "::error::YOUTUBE_COOKIES missing SAPISID / __Secure-3PAPISID"
+            exit 1
+          fi
+
+      - name: Run InnerTube macro bot
         env:
           YOUTUBE_VIDEO: ${{ inputs.video }}
           YOUTUBE_CHANNEL: ${{ inputs.channel }}
@@ -103,17 +112,6 @@ jobs:
           INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           SEND_COUNT: ${{ inputs.send_count }}
-          AUTH_TIMEOUT_SECONDS: ${{ inputs.auth_timeout_seconds }}
-          LOGIN_EMAIL: ${{ inputs.login_email }}
-          # Optional — only if you saved them from a previous run's log:
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          echo "=============================================="
-          echo "If no refresh-token secret is set, watch this"
-          echo "log for a phone login code, then open the URL"
-          echo "on your phone and approve access."
-          echo "=============================================="
-          python bot/youtube_macro.py
+        run: python bot/youtube_macro.py
