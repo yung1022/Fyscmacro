@@ -12,8 +12,10 @@ Auth is **YouTube TV device login** on your **phone**:
 
 1. Start **Actions → YouTube Live Chat Macro → Run workflow**
 2. Open the running job log
-3. When you see a code, open the printed URL on your phone (usually `https://www.google.com/device`)
-4. Enter the code and approve
+3. You will see:
+   - `Enter code: [ABC-DEF-GHI]`
+   - `Login as: [your.email@gmail.com]` (set `login_email` in the workflow if you have multiple Google accounts)
+4. Open the URL on your phone, enter the code, pick that account, approve
 5. The job continues and sends your command on the interval
 
 You do **not** need to copy browser cookies or create a Google Cloud project for the default path.
@@ -29,6 +31,7 @@ You do **not** need to copy browser cookies or create a Google Cloud project for
 | `duration_minutes` | `30` | How long to run (max 360) |
 | `send_count` | `0` | Optional cap |
 | `auth_timeout_seconds` | `600` | How long to wait for phone login |
+| `login_email` | `you@gmail.com` | **Which account to sign in as** (shown as `Login as: [email]`) |
 | `dry_run` | `false` | Skip login/sends |
 
 ## Optional: skip phone login next time

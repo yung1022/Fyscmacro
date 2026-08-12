@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: "600"
+      login_email:
+        description: "Google/YouTube email to sign in as (shown as Login as: [email])"
+        required: false
+        type: string
+        default: ""
       dry_run:
         description: "Log only; skip login and YouTube sends"
         required: false
@@ -99,6 +104,7 @@ jobs:
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           SEND_COUNT: ${{ inputs.send_count }}
           AUTH_TIMEOUT_SECONDS: ${{ inputs.auth_timeout_seconds }}
+          LOGIN_EMAIL: ${{ inputs.login_email }}
           # Optional — only if you saved them from a previous run's log:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
