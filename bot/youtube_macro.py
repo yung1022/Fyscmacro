@@ -34,17 +34,18 @@ USER_AGENT = (
 )
 TV_USER_AGENT = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 
-# YouTube TV device flow only accepts these scopes (not youtube.force-ssl).
-TV_OAUTH_SCOPES = (
-    "http://gdata.youtube.com "
-    "https://www.googleapis.com/auth/youtube-paid-content"
-)
-
 # Widely used YouTube TV OAuth client (fallback if /tv scrape fails)
 FALLBACK_TV_CLIENT_ID = (
     "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
 )
-FALLBACK_TV_CLIENT_SECRET = "SboVhoG9s0rNafixCJ7RIGRR"
+FALLBACK_TV_CLIENT_SECRET = "SboVhoG9s0rNafixCSGGKXAT"
+
+# Google device-flow scope for Data API + InnerTube OAuth.
+# Do NOT include youtube.force-ssl (invalid for device flow).
+TV_OAUTH_SCOPES = "https://www.googleapis.com/auth/youtube"
+
+OAUTH_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
+OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
 class BotError(RuntimeError):
@@ -89,8 +90,10 @@ def b64_type_b2(payload: bytes) -> str:
 
 
 def send_message_params(channel_id: str, video_id: str) -> str:
+    """Build InnerTube params for live_chat/send_message (YouTube.js shape)."""
     cv_token = pb_ld(5, [pb_ld(1, channel_id), pb_ld(2, video_id)])
-    raw = b"".join([pb_ld(1, cv_token), pb_vt(2, 2), pb_vt(3, 4)])
+    # number0=1, number1=4
+    raw = b"".join([pb_ld(1, cv_token), pb_vt(2, 1), pb_vt(3, 4)])
     return b64_type_b2(raw)
 
 
@@ -382,17 +385,13 @@ def device_login(
     login_email: str = "",
     timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
-    """YouTube TV device OAuth — authorize on your phone, no desktop needed."""
-    code_url = f"{ORIGIN}/o/oauth2/device/code"
-    token_url = f"{ORIGIN}/o/oauth2/token"
+    """Google device OAuth — authorize on your phone, no desktop needed."""
     payload = {
         "client_id": client_id,
         "scope": TV_OAUTH_SCOPES,
-        "device_id": str(uuid.uuid4()).replace("-", ""),
-        "device_model": "ytlr::",
     }
     try:
-        data = http_json("POST", code_url, body=payload)
+        data = http_json("POST", OAUTH_DEVICE_CODE_URL, body=payload)
     except BotError as exc:
         if exc.status == 400:
             raise BotError(
@@ -431,21 +430,21 @@ def device_login(
     token_body = {
         "client_id": client_id,
         "client_secret": client_secret,
-        "code": device_code,
-        "grant_type": "http://oauth.net/grant_type/device/1.0",
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
     }
     while time.monotonic() < deadline:
         time.sleep(interval)
         try:
             status, text = http_request(
                 "POST",
-                token_url,
+                OAUTH_TOKEN_URL,
                 headers={"Content-Type": "application/json"},
                 body=json.dumps(token_body).encode("utf-8"),
             )
             resp = json.loads(text) if text else {}
         except BotError as exc:
-            resp: dict[str, Any] = {}
+            resp = {}
             if exc.body:
                 try:
                     resp = json.loads(exc.body)
@@ -482,7 +481,6 @@ def device_login(
                     "YOUTUBE_REFRESH_TOKEN for unattended runs:",
                     flush=True,
                 )
-                # Do not fail if missing — TV flow sometimes omits on re-auth
                 print(resp["refresh_token"], flush=True)
             return {
                 "access_token": resp["access_token"],
@@ -498,29 +496,16 @@ def device_login(
 def refresh_access_token(
     client_id: str, client_secret: str, refresh_token: str
 ) -> dict[str, Any]:
-    token_url = f"{ORIGIN}/o/oauth2/token"
     resp = http_json(
         "POST",
-        token_url,
-        body={
+        OAUTH_TOKEN_URL,
+        form={
             "client_id": client_id,
             "client_secret": client_secret,
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         },
     )
-    if not resp.get("access_token"):
-        # Try Google's token endpoint as fallback
-        resp = http_json(
-            "POST",
-            "https://oauth2.googleapis.com/token",
-            form={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-        )
     if not resp.get("access_token"):
         raise BotError(f"Refresh failed: {resp}")
     return {
@@ -619,17 +604,26 @@ class YouTubeMacro:
                 "userAgent": USER_AGENT,
             }
         body = {"context": {"client": client}, **payload}
-        url = f"{ORIGIN}/youtubei/v1/{path}?prettyPrint=false&key={self.api_key}"
+        # Never mix public WEB ?key= with OAuth Bearer (different projects →
+        # FAILED_PRECONDITION / INVALID_ARGUMENT).
+        if authed:
+            url = f"{ORIGIN}/youtubei/v1/{path}?prettyPrint=false"
+        else:
+            url = (
+                f"{ORIGIN}/youtubei/v1/{path}"
+                f"?prettyPrint=false&key={self.api_key}"
+            )
         headers = {
             "Content-Type": "application/json",
             "X-Youtube-Client-Name": "7" if tv_client else "1",
             "X-Youtube-Client-Version": (
                 TV_CLIENT_VERSION if tv_client else self.client_version
             ),
+            "Origin": ORIGIN,
+            "Referer": f"{ORIGIN}/",
         }
         if authed:
             headers["Authorization"] = f"Bearer {self.access_token}"
-            headers["X-Origin"] = ORIGIN
         status, text = http_request(
             "POST", url, headers=headers, body=json.dumps(body).encode("utf-8")
         )
@@ -637,6 +631,68 @@ class YouTubeMacro:
             return json.loads(text) if text else {}
         except json.JSONDecodeError as exc:
             raise BotError(f"Invalid InnerTube JSON ({status}): {text[:200]}") from exc
+
+    def extract_live_chat_id_from_html(self, html: str) -> Optional[str]:
+        match = re.search(r'"liveChatRenderer"\s*:\s*\{[^{}]{0,200}?"continuations"', html)
+        # conversationId / liveChatId patterns used on watch pages
+        for pat in (
+            r'"liveChatId"\s*:\s*"([^"]+)"',
+            r'"conversationId"\s*:\s*"([^"]+)"',
+        ):
+            found = re.search(pat, html)
+            if found:
+                return found.group(1)
+        player = extract_json_assignment(html, "ytInitialPlayerResponse")
+        if player:
+            details = (player.get("videoDetails") or {})
+            # rarely present
+            if details.get("channelId") and False:
+                pass
+            live = (
+                (player.get("microformat") or {})
+                .get("playerMicroformatRenderer", {})
+                .get("liveBroadcastDetails")
+                or {}
+            )
+            # no chat id here usually
+            _ = live
+        initial = extract_json_assignment(html, "ytInitialData")
+        if initial:
+            blob = json.dumps(initial)
+            found = re.search(r'"liveChatId"\s*:\s*"([^"]+)"', blob)
+            if found:
+                return found.group(1)
+            # conversationId in live chat renderer
+            found = re.search(
+                r'"liveChatRenderer"[\s\S]{0,400}?"continuation"\s*:\s*"([^"]+)"',
+                blob,
+            )
+            # continuation is not liveChatId; keep looking
+            found = re.search(
+                r'"viewMode"\s*:\s*"LIVE_CHAT"[\s\S]{0,800}?"liveChatId"\s*:\s*"([^"]+)"',
+                blob,
+            )
+            if found:
+                return found.group(1)
+        _ = match
+        return None
+
+    def get_live_chat_id_innertube(self, video_id: str) -> str:
+        """Resolve activeLiveChatId via InnerTube next (no Data API)."""
+        data = self.innertube(
+            "next",
+            {"videoId": video_id},
+            authed=True,
+            tv_client=False,
+        )
+        blob = json.dumps(data)
+        found = re.search(r'"liveChatId"\s*:\s*"([^"]+)"', blob)
+        if found:
+            return found.group(1)
+        raise BotError(
+            f"No liveChatId in InnerTube next for {video_id}",
+            body=blob[:500],
+        )
 
     def resolve_video_from_channel(self, channel: str) -> str:
         handle = extract_channel_handle(channel)
@@ -699,7 +755,7 @@ class YouTubeMacro:
             return self.resolve_channel_id("@" + handle)
         return extract_channel_id(author_url)
 
-    def resolve_ids(self, video: str, channel: str) -> tuple[str, str]:
+    def resolve_ids(self, video: str, channel: str) -> tuple[str, str, str]:
         video_id = extract_video_id(video) if video else None
         if not video_id and channel:
             video_id = self.resolve_video_from_channel(channel)
@@ -742,32 +798,43 @@ class YouTubeMacro:
                 f"Could not resolve channelId for {video_id}. "
                 "Try passing channel=@handle as well."
             )
-        return video_id, str(channel_id)
+        return video_id, str(channel_id), html
 
-    def get_live_chat_id(self, video_id: str) -> str:
-        """Data API: videos.list → activeLiveChatId."""
-        url = (
-            f"{YOUTUBE_API}/videos?"
-            + urllib.parse.urlencode(
-                {"part": "liveStreamingDetails,snippet", "id": video_id}
+    def get_live_chat_id(self, video_id: str, html: str = "") -> str:
+        """Resolve activeLiveChatId: Data API → HTML → InnerTube next."""
+        try:
+            url = (
+                f"{YOUTUBE_API}/videos?"
+                + urllib.parse.urlencode(
+                    {"part": "liveStreamingDetails,snippet", "id": video_id}
+                )
             )
-        )
-        data = http_json(
-            "GET",
-            url,
-            headers={"Authorization": f"Bearer {self.access_token}"},
-        )
-        items = data.get("items") or []
-        if not items:
+            data = http_json(
+                "GET",
+                url,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+            )
+            items = data.get("items") or []
+            if items:
+                details = items[0].get("liveStreamingDetails") or {}
+                chat_id = details.get("activeLiveChatId")
+                if chat_id:
+                    return str(chat_id)
+                title = (items[0].get("snippet") or {}).get("title", video_id)
+                raise BotError(
+                    f"No active live chat for {video_id!r} ({title}). Is it live?"
+                )
             raise BotError(f"Video not found via Data API: {video_id}", body=str(data))
-        details = items[0].get("liveStreamingDetails") or {}
-        chat_id = details.get("activeLiveChatId")
-        if not chat_id:
-            title = (items[0].get("snippet") or {}).get("title", video_id)
-            raise BotError(
-                f"No active live chat for {video_id!r} ({title}). Is it live?"
-            )
-        return str(chat_id)
+        except BotError as exc:
+            print(f"Data API liveChatId unavailable ({exc})", flush=True)
+
+        if html:
+            chat_id = self.extract_live_chat_id_from_html(html)
+            if chat_id:
+                print(f"liveChatId from HTML: {chat_id}", flush=True)
+                return chat_id
+
+        return self.get_live_chat_id_innertube(video_id)
 
     def send_via_data_api(self, live_chat_id: str, message: str) -> dict[str, Any]:
         url = f"{YOUTUBE_API}/liveChat/messages?part=snippet"
@@ -792,25 +859,43 @@ class YouTubeMacro:
             "richMessage": {"textSegments": [{"text": message}]},
             "clientMessageId": str(uuid.uuid4()),
         }
-        data = self.innertube(
-            "live_chat/send_message",
-            payload,
-            authed=True,
-            tv_client=True,
-        )
-        if data.get("timeoutDurationUsec"):
-            usec = int(data["timeoutDurationUsec"])
-            raise BotError(f"Timed out from chat for ~{usec // 1_000_000}s")
-        actions = data.get("actions") or []
-        if not actions:
-            raise BotError(
-                "InnerTube send returned no actions",
-                body=json.dumps(data)[:800],
-            )
-        toast = json.dumps(actions)
-        if "Error, try again" in toast and "liveChatTextMessageRenderer" not in toast:
-            raise BotError("InnerTube send rejected", body=toast[:800])
-        return data
+        # YouTube.js uses WEB client for send_message with OAuth bearer.
+        last_error: Optional[Exception] = None
+        for use_tv in (False, True):
+            try:
+                data = self.innertube(
+                    "live_chat/send_message",
+                    payload,
+                    authed=True,
+                    tv_client=use_tv,
+                )
+            except BotError as exc:
+                last_error = exc
+                print(
+                    f"InnerTube send failed (tv={use_tv}): {exc}",
+                    flush=True,
+                )
+                continue
+            if data.get("timeoutDurationUsec"):
+                usec = int(data["timeoutDurationUsec"])
+                raise BotError(f"Timed out from chat for ~{usec // 1_000_000}s")
+            actions = data.get("actions") or []
+            if not actions:
+                last_error = BotError(
+                    "InnerTube send returned no actions",
+                    body=json.dumps(data)[:800],
+                )
+                continue
+            toast = json.dumps(actions)
+            if (
+                "Error, try again" in toast
+                and "liveChatTextMessageRenderer" not in toast
+            ):
+                last_error = BotError("InnerTube send rejected", body=toast[:800])
+                continue
+            return data
+        assert last_error is not None
+        raise last_error
 
     def send_message(
         self,
@@ -826,7 +911,6 @@ class YouTubeMacro:
         if len(message) > 200:
             raise ValueError("message too long (>200)")
 
-        # Prefer Data API; fall back to InnerTube TV send.
         if live_chat_id:
             try:
                 self.send_via_data_api(live_chat_id, message)
@@ -923,15 +1007,16 @@ def run(args: argparse.Namespace) -> int:
     if not args.dry_run:
         auth = obtain_auth(args)
         bot = YouTubeMacro(auth)
-        video_id, channel_id = bot.resolve_ids(args.video, args.channel)
+        video_id, channel_id, watch_html = bot.resolve_ids(
+            args.video, args.channel
+        )
         print(f"Resolved video={video_id} channel={channel_id}", flush=True)
         try:
-            live_chat_id = bot.get_live_chat_id(video_id)
+            live_chat_id = bot.get_live_chat_id(video_id, html=watch_html)
             print(f"liveChatId={live_chat_id}", flush=True)
         except BotError as exc:
             print(
-                f"Data API liveChatId unavailable ({exc}); "
-                "will use InnerTube send only",
+                f"liveChatId unavailable ({exc}); will use InnerTube send only",
                 flush=True,
             )
 

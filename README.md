@@ -72,3 +72,8 @@ python3 -m unittest tests/test_youtube_macro.py -v
 - Follow YouTube + channel chat rules; short intervals can get you timed out.
 - Device codes expire (~30 minutes); raise `auth_timeout_seconds` if you need longer.
 - Prefer a **video URL** when the stream is already open.
+
+After this fix, phone login uses Google’s device OAuth with the
+`youtube` scope (so Data API chat send works), and InnerTube OAuth
+requests no longer mix the public WEB API key with your Bearer token
+(that mismatch caused `FAILED_PRECONDITION`).
