@@ -38,10 +38,6 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: youtube-macro
-  cancel-in-progress: false
-
 jobs:
   send-command:
     runs-on: ubuntu-latest
