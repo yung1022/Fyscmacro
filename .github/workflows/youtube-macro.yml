@@ -40,7 +40,7 @@ on:
 
 concurrency:
   group: youtube-macro
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   send-command:
