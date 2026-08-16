@@ -21,6 +21,8 @@ The Google account behind those cookies is the account that posts in chat.
 
 Cookies expire — if sends fail, copy a fresh Cookie string.
 
+On API errors the bot **keeps retrying until `duration_minutes` wall-clock is used up** (retry waits count toward that duration).
+
 ## Run
 
 **Actions → YouTube Live Chat Macro → Run workflow**
