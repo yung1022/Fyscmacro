@@ -670,8 +670,12 @@ def run(args: argparse.Namespace) -> int:
     validate(args)
     interval = args.interval_seconds
     duration_sec = max(0.0, args.duration_minutes) * 60.0
-    end_at = time.monotonic() + duration_sec if duration_sec > 0 else None
+    # Wall-clock budget: retries count toward the same duration.
+    started_at = time.monotonic()
+    end_at = started_at + duration_sec if duration_sec > 0 else None
     max_count = args.count if args.count > 0 else None
+    # Backoff between failed API attempts (capped); does not reset duration.
+    retry_delay = max(5.0, min(interval, 30.0))
 
     print(
         f"video={args.video or '(auto)'} channel={args.channel or '(none)'} "
@@ -680,27 +684,42 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
     print(f"Command: {args.command!r}", flush=True)
+    if end_at is not None:
+        print(
+            f"Will keep retrying API errors until {args.duration_minutes}m "
+            "wall-clock is used up",
+            flush=True,
+        )
 
     bot = YouTubeMacro(cookie_header=args.cookies)
     video_id = extract_video_id(args.video) or "dry-run-video"
     channel_id = "dry-run-channel"
+    resolved = False
 
-    if not args.dry_run:
-        video_id, channel_id, _html = bot.resolve_ids(args.video, args.channel)
-        print(f"Resolved video={video_id} channel={channel_id}", flush=True)
-        cont = extract_live_chat_continuation(_html)
-        if cont:
-            print("Live chat continuation found on watch page", flush=True)
-        else:
-            print(
-                "Warning: no live chat continuation on page — stream may be offline",
-                flush=True,
-            )
+    def time_left() -> Optional[float]:
+        if end_at is None:
+            return None
+        return end_at - time.monotonic()
+
+    def duration_exhausted() -> bool:
+        left = time_left()
+        return left is not None and left <= 0
+
+    def sleep_budget(seconds: float) -> bool:
+        """Sleep up to seconds or until duration ends. True if time remains."""
+        if duration_exhausted():
+            return False
+        left = time_left()
+        wait = seconds if left is None else min(seconds, max(0.0, left))
+        if wait > 0:
+            time.sleep(wait)
+        return not duration_exhausted()
 
     sent = 0
+    errors = 0
     try:
         while True:
-            if end_at is not None and time.monotonic() >= end_at:
+            if duration_exhausted():
                 print("Duration reached; stopping", flush=True)
                 break
             if max_count is not None and sent >= max_count:
@@ -712,33 +731,87 @@ def run(args: argparse.Namespace) -> int:
                     f"[dry-run] would InnerTube send to {video_id}: {args.command}",
                     flush=True,
                 )
-            else:
+                sent += 1
+                if not sleep_budget(interval):
+                    print("Duration reached; stopping", flush=True)
+                    break
+                continue
+
+            try:
+                if not resolved:
+                    video_id, channel_id, _html = bot.resolve_ids(
+                        args.video, args.channel
+                    )
+                    print(
+                        f"Resolved video={video_id} channel={channel_id}",
+                        flush=True,
+                    )
+                    cont = extract_live_chat_continuation(_html)
+                    if cont:
+                        print(
+                            "Live chat continuation found on watch page",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "Warning: no live chat continuation on page — "
+                            "stream may be offline",
+                            flush=True,
+                        )
+                    resolved = True
+
                 bot.send_message(channel_id, video_id, args.command)
                 print(f"Sent #{sent + 1}: {args.command}", flush=True)
-
-            sent += 1
-
-            if end_at is not None:
-                remaining = end_at - time.monotonic()
-                if remaining <= 0:
-                    break
+                sent += 1
                 if max_count is not None and sent >= max_count:
+                    print("Send count reached; stopping", flush=True)
                     break
-                time.sleep(min(interval, remaining))
-            else:
-                if max_count is not None and sent >= max_count:
+                if not sleep_budget(interval):
+                    print("Duration reached; stopping", flush=True)
                     break
-                time.sleep(interval)
+            except BotError as exc:
+                errors += 1
+                left = time_left()
+                left_txt = (
+                    "unlimited"
+                    if left is None
+                    else f"{max(0.0, left):.0f}s left"
+                )
+                print(
+                    f"API error #{errors} ({left_txt}): {exc}",
+                    flush=True,
+                )
+                if exc.body:
+                    print(exc.body[:500], flush=True)
+                # Re-resolve next time in case stream/chat id changed.
+                resolved = False
+                if duration_exhausted():
+                    print(
+                        "Duration reached after API error; stopping",
+                        flush=True,
+                    )
+                    break
+                print(f"Retrying in {retry_delay}s...", flush=True)
+                if not sleep_budget(retry_delay):
+                    print(
+                        "Duration reached during retry wait; stopping",
+                        flush=True,
+                    )
+                    break
     except KeyboardInterrupt:
         print("Interrupted", flush=True)
         return 130
-    except BotError as exc:
-        print(f"Error: {exc}", flush=True)
-        if exc.body:
-            print(exc.body[:1000], flush=True)
-        return 1
 
-    print(f"Done. Total sends: {sent}", flush=True)
+    elapsed = time.monotonic() - started_at
+    print(
+        f"Done. Total sends: {sent}, API errors: {errors}, "
+        f"elapsed: {elapsed:.0f}s",
+        flush=True,
+    )
+    # Exit 0 if we used the duration (even with errors); non-zero only if
+    # we never sent anything and duration was unlimited/count mode.
+    if sent == 0 and max_count is not None and errors > 0 and end_at is None:
+        return 1
     return 0
 
 

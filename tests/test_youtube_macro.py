@@ -94,6 +94,39 @@ class DryRunTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             youtube_macro.validate(args)
 
+    def test_api_errors_retry_until_duration(self) -> None:
+        args = youtube_macro.parse_args(
+            [
+                "--video",
+                "dQw4w9WgXcQ",
+                "--command",
+                "!join",
+                "--interval-seconds",
+                "1",
+                "--duration-minutes",
+                "1",
+                "--cookies",
+                "SAPISID=test; SID=x",
+            ]
+        )
+        bot = mock.Mock()
+        bot.resolve_ids.side_effect = youtube_macro.BotError("resolve fail", status=400)
+        clock = {"t": 0.0}
+
+        def mono() -> float:
+            return clock["t"]
+
+        def sleep(sec: float) -> None:
+            clock["t"] += sec
+
+        with mock.patch.object(youtube_macro, "YouTubeMacro", return_value=bot), mock.patch(
+            "youtube_macro.time.monotonic", side_effect=mono
+        ), mock.patch("youtube_macro.time.sleep", side_effect=sleep):
+            code = youtube_macro.run(args)
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(bot.resolve_ids.call_count, 2)
+        self.assertGreaterEqual(clock["t"], 60.0)
+
 
 if __name__ == "__main__":
     unittest.main()
