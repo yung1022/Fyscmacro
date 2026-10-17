@@ -388,6 +388,11 @@ def extract_live_chat_continuation(html: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def parse_command_list(raw: str) -> list[str]:
+    commands = [part.strip() for part in raw.split(",")]
+    return [command for command in commands if command]
+
+
 def gh_notice(title: str, message: str) -> None:
     safe_title = title.replace("\n", " ").replace("%", "%25").replace(":", "%3A")
     safe_msg = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
@@ -643,7 +648,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def validate(args: argparse.Namespace) -> None:
-    if not args.command:
+    commands = parse_command_list(args.command)
+    if not commands:
         raise SystemExit("Missing --command / COMMAND")
     if not args.video and not args.channel:
         raise SystemExit("Provide --video and/or --channel")
@@ -668,6 +674,7 @@ def validate(args: argparse.Namespace) -> None:
 
 def run(args: argparse.Namespace) -> int:
     validate(args)
+    commands = parse_command_list(args.command)
     interval = args.interval_seconds
     duration_sec = max(0.0, args.duration_minutes) * 60.0
     # Wall-clock budget: retries count toward the same duration.
@@ -683,7 +690,10 @@ def run(args: argparse.Namespace) -> int:
         f"count={max_count or 'unlimited'} dry_run={args.dry_run}",
         flush=True,
     )
-    print(f"Command: {args.command!r}", flush=True)
+    if len(commands) == 1:
+        print(f"Command: {commands[0]!r}", flush=True)
+    else:
+        print(f"Commands ({len(commands)}): {commands!r}", flush=True)
     if end_at is not None:
         print(
             f"Will keep retrying API errors until {args.duration_minutes}m "
@@ -725,10 +735,11 @@ def run(args: argparse.Namespace) -> int:
             if max_count is not None and sent >= max_count:
                 print("Send count reached; stopping", flush=True)
                 break
+            command = commands[sent % len(commands)]
 
             if args.dry_run:
                 print(
-                    f"[dry-run] would InnerTube send to {video_id}: {args.command}",
+                    f"[dry-run] would InnerTube send to {video_id}: {command}",
                     flush=True,
                 )
                 sent += 1
@@ -760,8 +771,8 @@ def run(args: argparse.Namespace) -> int:
                         )
                     resolved = True
 
-                bot.send_message(channel_id, video_id, args.command)
-                print(f"Sent #{sent + 1}: {args.command}", flush=True)
+                bot.send_message(channel_id, video_id, command)
+                print(f"Sent #{sent + 1}: {command}", flush=True)
                 sent += 1
                 if max_count is not None and sent >= max_count:
                     print("Send count reached; stopping", flush=True)

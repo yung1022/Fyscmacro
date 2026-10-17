@@ -14,7 +14,7 @@ on:
         type: string
         default: ""
       command:
-        description: "Chat message or command to send"
+        description: "Chat message or commands to send (comma-separated)"
         required: true
         type: string
       interval_seconds:
@@ -65,12 +65,13 @@ jobs:
           video = os.environ.get("YOUTUBE_VIDEO", "").strip()
           channel = os.environ.get("YOUTUBE_CHANNEL", "").strip()
           command = os.environ["COMMAND"].strip()
+          commands = [part.strip() for part in command.split(",") if part.strip()]
           interval = float(os.environ["INTERVAL_SECONDS"])
           duration = float(os.environ["DURATION_MINUTES"])
           count = int(float(os.environ.get("SEND_COUNT") or "0"))
           if not video and not channel:
               sys.exit("Provide video and/or channel")
-          if not command:
+          if not commands:
               sys.exit("command is required")
           if interval < 1:
               sys.exit("interval_seconds must be >= 1")

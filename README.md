@@ -31,7 +31,7 @@ On API errors the bot **keeps retrying until `duration_minutes` wall-clock is us
 | --- | --- | --- |
 | `video` | live URL or `ImeRw_CxUio` | Preferred target |
 | `channel` | `@SomeCreator` | Used if `video` empty |
-| `command` | `!join` | Chat text |
+| `command` | `!join, !raid` | Chat text or a comma-separated list sent in order |
 | `interval_seconds` | `60` | Wait between sends |
 | `duration_minutes` | `30` | Run length (max 360) |
 | `send_count` | `0` | Optional cap |
@@ -44,7 +44,7 @@ export YOUTUBE_COOKIES='SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...'
 
 python3 bot/youtube_macro.py \
   --video 'https://www.youtube.com/watch?v=VIDEO_ID' \
-  --command '!join' \
+  --command '!join, !raid' \
   --interval-seconds 60 \
   --duration-minutes 30
 ```
@@ -52,7 +52,7 @@ python3 bot/youtube_macro.py \
 Dry run:
 
 ```bash
-python3 bot/youtube_macro.py --video dQw4w9WgXcQ --command '!join' --count 3 --dry-run
+python3 bot/youtube_macro.py --video dQw4w9WgXcQ --command '!join, !raid' --count 3 --dry-run
 ```
 
 ## Tests
