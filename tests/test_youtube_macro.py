@@ -36,6 +36,18 @@ class ParseTests(unittest.TestCase):
             youtube_macro.extract_channel_handle("@SomeCreator"), "SomeCreator"
         )
 
+    def test_parse_command_list(self) -> None:
+        self.assertEqual(
+            youtube_macro.parse_command_list("!join, !raid,  !wave  "),
+            ["!join", "!raid", "!wave"],
+        )
+
+    def test_parse_command_list_ignores_empty_entries(self) -> None:
+        self.assertEqual(
+            youtube_macro.parse_command_list("!join, , ,!raid,"),
+            ["!join", "!raid"],
+        )
+
 
 class ProtobufTests(unittest.TestCase):
     def test_send_message_params_stable(self) -> None:
@@ -87,6 +99,40 @@ class DryRunTests(unittest.TestCase):
         with mock.patch.object(youtube_macro.time, "sleep", return_value=None):
             self.assertEqual(youtube_macro.run(args), 0)
 
+    def test_dry_run_cycles_comma_separated_commands(self) -> None:
+        args = youtube_macro.parse_args(
+            [
+                "--video",
+                "dQw4w9WgXcQ",
+                "--command",
+                "!join, !raid",
+                "--interval-seconds",
+                "1",
+                "--duration-minutes",
+                "0",
+                "--count",
+                "3",
+                "--dry-run",
+            ]
+        )
+        with mock.patch("builtins.print") as print_mock, mock.patch.object(
+            youtube_macro.time, "sleep", return_value=None
+        ):
+            self.assertEqual(youtube_macro.run(args), 0)
+        sent_lines = [
+            call.args[0]
+            for call in print_mock.call_args_list
+            if call.args and "[dry-run] would InnerTube send" in call.args[0]
+        ]
+        self.assertEqual(
+            sent_lines,
+            [
+                "[dry-run] would InnerTube send to dQw4w9WgXcQ: !join",
+                "[dry-run] would InnerTube send to dQw4w9WgXcQ: !raid",
+                "[dry-run] would InnerTube send to dQw4w9WgXcQ: !join",
+            ],
+        )
+
     def test_requires_cookies_when_not_dry_run(self) -> None:
         args = youtube_macro.parse_args(
             ["--video", "dQw4w9WgXcQ", "--command", "!join", "--count", "1"]
@@ -126,6 +172,39 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertGreaterEqual(bot.resolve_ids.call_count, 2)
         self.assertGreaterEqual(clock["t"], 60.0)
+
+    def test_live_run_cycles_comma_separated_commands(self) -> None:
+        args = youtube_macro.parse_args(
+            [
+                "--video",
+                "dQw4w9WgXcQ",
+                "--command",
+                "!join, !raid",
+                "--interval-seconds",
+                "1",
+                "--duration-minutes",
+                "0",
+                "--count",
+                "3",
+                "--cookies",
+                "SAPISID=test; SID=x",
+            ]
+        )
+        bot = mock.Mock()
+        bot.resolve_ids.return_value = (
+            "dQw4w9WgXcQ",
+            "UCabcdefghijklmnopqrstuv",
+            "",
+        )
+        with mock.patch.object(youtube_macro, "YouTubeMacro", return_value=bot), mock.patch(
+            "youtube_macro.time.sleep", return_value=None
+        ):
+            code = youtube_macro.run(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[2] for call in bot.send_message.call_args_list],
+            ["!join", "!raid", "!join"],
+        )
 
 
 if __name__ == "__main__":
